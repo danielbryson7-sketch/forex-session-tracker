@@ -61,6 +61,15 @@ function Send-Slack([string]$Message,[string]$ThreadTs = '') {
   return $null
 }
 
+function Update-SlackParent([string]$Message,[string]$Timestamp) {
+  if ($DryRun) { Write-Host "DRY RUN parent update ($Timestamp): $Message"; return }
+  if (-not $script:threadedMode) { return }
+  $payload = @{ channel=$script:slackChannelId; ts=$Timestamp; text=$Message } | ConvertTo-Json -Compress -Depth 4
+  $headers = @{ Authorization = "Bearer $($script:slackBotToken)" }
+  $response = Invoke-RestMethod -Uri 'https://slack.com/api/chat.update' -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $payload -TimeoutSec 20
+  if (-not $response.ok) { throw "Slack chat.update failed: $($response.error)" }
+}
+
 function Get-TradeChart($Position,[ValidateSet('entry','close')][string]$Mode = 'entry') {
   if (-not $script:oandaToken) { throw 'OANDA token is unavailable for the Slack chart.' }
   $pair = [string]$Position.pair
@@ -164,7 +173,7 @@ function Get-Snapshot($Ledger) {
 function Message-Arm([string]$Pair,$Pending) {
   $side = if ([string]$Pending.direction -in @('1','long','LONG')) { 'LONG' } else { 'SHORT' }
   $entry = Format-Price $Pair $Pending.entry
-  return ":large_orange_diamond: *$Pair armed $side* · $(Format-NyTime $Pending.signalTime)`n70.5% entry waiting at $entry · signal close $(Format-Price $Pair $Pending.signalPrice)"
+  return ":v2-armed: *$Pair armed $side* · $(Format-NyTime $Pending.signalTime)`n70.5% entry waiting at $entry · signal close $(Format-Price $Pair $Pending.signalPrice)"
 }
 
 function Get-ArmKey([string]$Pair,$Item) {
@@ -176,6 +185,43 @@ function Get-ArmFromTrade($Trade) {
     signalPrice=$Trade.signalPrice; entry=$Trade.entryTarget }
 }
 
+function Message-Parent($Trade,[ValidateSet('open','closed')][string]$Stage) {
+  $pair = [string]$Trade.pair
+  $side = ([string]$Trade.direction).ToUpperInvariant()
+  $directionEmoji = if ($side -eq 'LONG') { ':v2-long:' } else { ':v2-short:' }
+  $icons = ":v2-armed: $directionEmoji"
+  $status = "OPEN $side"
+  if ($Stage -eq 'closed') {
+    $exitReason = [string]$Trade.exitReason
+    $exitEmoji = switch ($exitReason) {
+      'tp1' { ':v2-take-profit:' }
+      'stop' { ':v2-stop-loss:' }
+      default { ':checkered_flag:' }
+    }
+    $icons += " $exitEmoji"
+    $status = "CLOSED $side · $($exitReason.ToUpperInvariant())"
+  }
+  $text = "$icons *$pair $status*`nArmed $(Format-NyTime $Trade.signalTime) · signal close $(Format-Price $pair $Trade.signalPrice) · 70.5% $(Format-Price $pair $Trade.entryTarget)"
+  $text += "`nOpened $(Format-NyTime $Trade.entryTime) at $(Format-Price $pair $Trade.entry)"
+  if ($Stage -eq 'closed') {
+    $pips = [double]$Trade.netPips
+    $signedPips = if ($pips -ge 0) { '+' } else { '' }
+    $text += " · closed $(Format-NyTime $Trade.exitTime) at $(Format-Price $pair $Trade.exit) ($signedPips$($pips.ToString('F1',[Globalization.CultureInfo]::InvariantCulture)) pips)"
+  }
+  return $text
+}
+
+function Set-ParentStage($State,$Trade,[ValidateSet('open','closed')][string]$Stage) {
+  if (-not $script:threadedMode) { return }
+  $armKey = Get-ArmKey ([string]$Trade.pair) $Trade
+  $thread = $State.threads[$armKey]
+  if (-not $thread -or -not $thread.ts) { throw "Missing Slack parent for $armKey." }
+  if ($thread.stage -eq $Stage -or $thread.stage -eq 'closed') { return }
+  Update-SlackParent (Message-Parent $Trade $Stage) ([string]$thread.ts)
+  $thread.stage = $Stage
+  Save-State $State
+}
+
 function Ensure-Thread($State,[string]$Pair,$Trade) {
   $armKey = Get-ArmKey $Pair $Trade
   if (-not $armKey -or -not $Trade.signalTime) { throw "Cannot thread $Pair trade without its signal time." }
@@ -184,7 +230,7 @@ function Ensure-Thread($State,[string]$Pair,$Trade) {
   $arm = Get-ArmFromTrade $Trade
   $posted = Send-Slack (Message-Arm $Pair $arm)
   if (-not $posted.ts) { throw "Slack did not return a parent timestamp for $Pair." }
-  $State.threads[$armKey] = @{ ts=$posted.ts; channel=$posted.channel }
+  $State.threads[$armKey] = @{ ts=$posted.ts; channel=$posted.channel; stage='armed' }
   Save-State $State
   return [string]$posted.ts
 }
@@ -225,7 +271,7 @@ function Scan-Once {
     if ($script:threadedMode) {
       if (-not $state.threads.ContainsKey($key)) {
         $posted = Send-Slack (Message-Arm $item.pair $item.pending)
-        $state.threads[$key] = @{ ts=$posted.ts; channel=$posted.channel }
+        $state.threads[$key] = @{ ts=$posted.ts; channel=$posted.channel; stage='armed' }
         Save-State $state
       }
     } else { $null = Send-Slack (Message-Arm $item.pair $item.pending) }
@@ -236,6 +282,7 @@ function Scan-Once {
     if ($seenOpen.Contains($key)) { continue }
     $position = $snapshot.open[$key]
     $parentTs = if ($script:threadedMode) { Ensure-Thread $state $position.pair $position } else { '' }
+    if ($script:threadedMode) { Set-ParentStage $state $position 'open' }
     if ($script:threadedMode -and -not $DryRun) {
       try {
         $chartPath = Get-TradeChart $position 'entry'
@@ -252,6 +299,7 @@ function Scan-Once {
     if ($seenClosed.Contains($key)) { continue }
     $trade = $snapshot.closed[$key]
     $parentTs = if ($script:threadedMode) { Ensure-Thread $state $trade.pair $trade } else { '' }
+    if ($script:threadedMode) { Set-ParentStage $state $trade 'closed' }
     if ($script:threadedMode -and -not $DryRun) {
       try {
         $chartPath = Get-TradeChart $trade 'close'
