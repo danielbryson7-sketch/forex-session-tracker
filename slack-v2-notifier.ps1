@@ -99,7 +99,8 @@ function Send-SlackChart([string]$Message,[string]$ThreadTs,[string]$ChartPath,[
   $bytes = [IO.File]::ReadAllBytes($ChartPath)
   $headers = @{ Authorization="Bearer $($script:slackBotToken)" }
   $filename = [IO.Path]::GetFileName($ChartPath)
-  $first = Invoke-RestMethod -Uri 'https://slack.com/api/files.getUploadURLExternal' -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body (@{ filename=$filename; length=$bytes.Length; alt_txt="$Pair M15 candles, OTE zone and signal candle at trade entry" } | ConvertTo-Json -Compress) -TimeoutSec 20
+  $uploadRequest = @{ filename=$filename; length=[string]$bytes.Length; alt_txt="$Pair M15 candles, OTE zone and signal candle at trade entry" }
+  $first = Invoke-RestMethod -Uri 'https://slack.com/api/files.getUploadURLExternal' -Method Post -Headers $headers -ContentType 'application/x-www-form-urlencoded' -Body $uploadRequest -TimeoutSec 20
   if (-not $first.ok -or -not $first.upload_url -or -not $first.file_id) { throw "Slack file upload initialization failed: $($first.error)" }
   $upload = Invoke-WebRequest -Uri ([string]$first.upload_url) -Method Post -Body $bytes -ContentType 'image/png' -TimeoutSec 30 -UseBasicParsing
   if ($upload.StatusCode -ne 200) { throw 'Slack did not accept the chart bytes.' }
