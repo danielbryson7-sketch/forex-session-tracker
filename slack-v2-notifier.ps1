@@ -61,30 +61,40 @@ function Send-Slack([string]$Message,[string]$ThreadTs = '') {
   return $null
 }
 
-function Get-TradeChart($Position) {
+function Get-TradeChart($Position,[ValidateSet('entry','close')][string]$Mode = 'entry') {
   if (-not $script:oandaToken) { throw 'OANDA token is unavailable for the Slack chart.' }
   $pair = [string]$Position.pair
   if ($pair -notmatch '^[A-Z]{3}/[A-Z]{3}$') { throw 'Invalid forex pair for the Slack chart.' }
   $entry = [DateTimeOffset]::Parse([string]$Position.entryTime)
+  $signal = [DateTimeOffset]::Parse([string]$Position.signalTime)
+  $end = if ($Mode -eq 'close') { [DateTimeOffset]::Parse([string]$Position.exitTime) } else { $entry }
+  $begin = $entry.AddHours(-4).AddMinutes(-45)
+  if ($signal -lt $begin) { $begin = $signal }
   $chartDir = Join-Path $PSScriptRoot 'data/slack-charts'
   [IO.Directory]::CreateDirectory($chartDir) | Out-Null
-  $stem = "$($pair.Replace('/',''))-$($entry.ToUnixTimeSeconds())"
+  $stem = "$($pair.Replace('/',''))-$($entry.ToUnixTimeSeconds())-$Mode"
+  if ($Mode -eq 'close') { $stem += "-$($end.ToUnixTimeSeconds())" }
   $jsonPath = Join-Path $chartDir "$stem.json"
   $pngPath = Join-Path $chartDir "$stem.png"
   if (Test-Path $pngPath) { return $pngPath }
   $hostName = if ($script:oandaEnvironment -eq 'live') { 'api-fxtrade.oanda.com' } else { 'api-fxpractice.oanda.com' }
-  $from = [uri]::EscapeDataString($entry.AddHours(-4).AddMinutes(-45).UtcDateTime.ToString('o'))
-  $to = [uri]::EscapeDataString($entry.AddMinutes(15).AddSeconds(1).UtcDateTime.ToString('o'))
+  $from = [uri]::EscapeDataString($begin.UtcDateTime.ToString('o'))
+  $to = [uri]::EscapeDataString($end.AddMinutes(15).AddSeconds(1).UtcDateTime.ToString('o'))
   $instrument = $pair.Replace('/','_')
   $url = "https://$hostName/v3/instruments/$instrument/candles?price=BA&granularity=M15&from=$from&to=$to"
   $headers = @{ Authorization="Bearer $($script:oandaToken)"; 'Accept-Datetime-Format'='RFC3339' }
   $response = Invoke-RestMethod -Uri $url -Headers $headers -TimeoutSec 25
-  $bars = @($response.candles | Where-Object { $_.complete -and $_.bid } | ForEach-Object {
+  $bars = @($response.candles | Where-Object { $_.complete -and $_.bid -and [DateTimeOffset]::Parse([string]$_.time) -le $end } | ForEach-Object {
     @{ time=[string]$_.time; open=[double]$_.bid.o; high=[double]$_.bid.h; low=[double]$_.bid.l; close=[double]$_.bid.c }
   })
   if ($bars.Count -lt 2) { throw "OANDA returned fewer than two completed M15 bars for $pair." }
-  $chart = @{ pair=$pair; direction=$Position.direction; signalTime=$Position.signalTime; entryTime=$Position.entryTime;
-    entryTarget=$Position.entryTarget; zoneLow=$Position.entryZoneLow; zoneHigh=$Position.entryZoneHigh; bars=$bars }
+  $chart = @{ mode=$Mode; pair=$pair; direction=$Position.direction; signalTime=$Position.signalTime; signalPrice=$Position.signalPrice;
+    entryTime=$Position.entryTime; entryPrice=$Position.entry; entryTarget=$Position.entryTarget;
+    zoneLow=$Position.entryZoneLow; zoneHigh=$Position.entryZoneHigh; bars=$bars }
+  if ($Mode -eq 'close') {
+    $chart.exitTime=$Position.exitTime; $chart.exitPrice=$Position.exit; $chart.exitReason=$Position.exitReason;
+    $chart.netPips=$Position.netPips
+  }
   [IO.File]::WriteAllText($jsonPath,($chart | ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
   try {
     $renderer = Join-Path $PSScriptRoot 'render-slack-trade-chart.py'
@@ -94,17 +104,18 @@ function Get-TradeChart($Position) {
   return $pngPath
 }
 
-function Send-SlackChart([string]$Message,[string]$ThreadTs,[string]$ChartPath,[string]$Pair) {
+function Send-SlackChart([string]$Message,[string]$ThreadTs,[string]$ChartPath,[string]$Pair,[ValidateSet('entry','close')][string]$Mode = 'entry') {
   if ($DryRun) { Write-Host "DRY RUN chart in thread $ThreadTs : $ChartPath"; return }
   $bytes = [IO.File]::ReadAllBytes($ChartPath)
   $headers = @{ Authorization="Bearer $($script:slackBotToken)" }
   $filename = [IO.Path]::GetFileName($ChartPath)
-  $uploadRequest = @{ filename=$filename; length=[string]$bytes.Length; alt_txt="$Pair M15 candles, OTE zone and signal candle at trade entry" }
+  $description = if ($Mode -eq 'close') { "$Pair M15 chart with OTE zone, A arm, L or S entry, exit dot, and trade path" } else { "$Pair M15 candles, OTE zone, A arm, and L or S entry" }
+  $uploadRequest = @{ filename=$filename; length=[string]$bytes.Length; alt_txt=$description }
   $first = Invoke-RestMethod -Uri 'https://slack.com/api/files.getUploadURLExternal' -Method Post -Headers $headers -ContentType 'application/x-www-form-urlencoded' -Body $uploadRequest -TimeoutSec 20
   if (-not $first.ok -or -not $first.upload_url -or -not $first.file_id) { throw "Slack file upload initialization failed: $($first.error)" }
   $upload = Invoke-WebRequest -Uri ([string]$first.upload_url) -Method Post -Body $bytes -ContentType 'image/png' -TimeoutSec 30 -UseBasicParsing
   if ($upload.StatusCode -ne 200) { throw 'Slack did not accept the chart bytes.' }
-  $complete = @{ files=@(@{ id=[string]$first.file_id; title="$Pair M15 entry chart" }); channel_id=$script:slackChannelId;
+  $complete = @{ files=@(@{ id=[string]$first.file_id; title="$Pair M15 $Mode chart" }); channel_id=$script:slackChannelId;
     thread_ts=$ThreadTs; initial_comment=$Message } | ConvertTo-Json -Depth 5 -Compress
   $last = Invoke-RestMethod -Uri 'https://slack.com/api/files.completeUploadExternal' -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $complete -TimeoutSec 30
   if (-not $last.ok) { throw "Slack chart share failed: $($last.error)" }
@@ -182,7 +193,9 @@ function Message-Open($Position) {
   $pair = [string]$Position.pair
   $practice = if ($Position.practice.status) { [string]$Position.practice.status } else { 'PAPER_ONLY' }
   $side = ([string]$Position.direction).ToUpperInvariant()
-  return ":large_blue_circle: *$pair $side opened* · $(Format-NyTime $Position.entryTime)`nEntry $(Format-Price $pair $Position.entry) · TP $(Format-Price $pair $Position.tp1) · SL $(Format-Price $pair $Position.stop) · OANDA practice: $practice"
+  $fill = if ($Position.practice.fillPrice) { " at $(Format-Price $pair $Position.practice.fillPrice)" } else { '' }
+  $fillTime = if ($Position.practice.fillTime) { " · $(Format-NyTime $Position.practice.fillTime)" } else { '' }
+  return ":large_blue_circle: *TRADE OPENED — $pair $side*`nPaper entry: *$(Format-Price $pair $Position.entry)* · entry candle $(Format-NyTime $Position.entryTime) · 70.5% OTE retouch`nTP $(Format-Price $pair $Position.tp1) · SL $(Format-Price $pair $Position.stop)`nOANDA practice: $practice$fill$fillTime"
 }
 
 function Message-Close($Trade) {
@@ -225,8 +238,8 @@ function Scan-Once {
     $parentTs = if ($script:threadedMode) { Ensure-Thread $state $position.pair $position } else { '' }
     if ($script:threadedMode -and -not $DryRun) {
       try {
-        $chartPath = Get-TradeChart $position
-        Send-SlackChart (Message-Open $position) $parentTs $chartPath $position.pair
+        $chartPath = Get-TradeChart $position 'entry'
+        Send-SlackChart (Message-Open $position) $parentTs $chartPath $position.pair 'entry'
       } catch {
         Write-Warning "Slack chart failed for $($position.pair): $($_.Exception.Message). Posting the entry text instead."
         $null = Send-Slack (Message-Open $position) $parentTs
@@ -239,7 +252,15 @@ function Scan-Once {
     if ($seenClosed.Contains($key)) { continue }
     $trade = $snapshot.closed[$key]
     $parentTs = if ($script:threadedMode) { Ensure-Thread $state $trade.pair $trade } else { '' }
-    $null = Send-Slack (Message-Close $trade) $parentTs
+    if ($script:threadedMode -and -not $DryRun) {
+      try {
+        $chartPath = Get-TradeChart $trade 'close'
+        Send-SlackChart (Message-Close $trade) $parentTs $chartPath $trade.pair 'close'
+      } catch {
+        Write-Warning "Slack closing chart failed for $($trade.pair): $($_.Exception.Message). Posting the close text instead."
+        $null = Send-Slack (Message-Close $trade) $parentTs
+      }
+    } else { $null = Send-Slack (Message-Close $trade) $parentTs }
     [void]$seenClosed.Add($key)
     $state.seenClosed = @($seenClosed); Save-State $state
   }
