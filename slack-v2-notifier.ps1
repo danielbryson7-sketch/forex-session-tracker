@@ -9,6 +9,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $nyZone = [TimeZoneInfo]::FindSystemTimeZoneById('America/New_York')
+. (Join-Path $PSScriptRoot 'daily-summary-v2.ps1')
 $script:slackWebhookUrl = [string]$env:SLACK_WEBHOOK_URL
 $script:slackBotToken = [string]$env:SLACK_BOT_TOKEN
 $script:slackChannelId = [string]$env:SLACK_CHANNEL_ID
@@ -328,6 +329,26 @@ function Refresh-OteStatus($State,$Snapshot,$Ledger) {
   }
 }
 
+function Send-DailySummaryIfDue($State,$Ledger) {
+  $now = [DateTimeOffset]::UtcNow
+  $local = [TimeZoneInfo]::ConvertTime($now,$nyZone)
+  if ($local.DayOfWeek -in @([DayOfWeek]::Saturday,[DayOfWeek]::Sunday)) { return }
+  $cutoffNy = $local.Date.AddHours(17)
+  if ($local.DateTime -lt $cutoffNy.AddMinutes(3)) { return }
+  $key = $cutoffNy.ToString('yyyy-MM-dd',[Globalization.CultureInfo]::InvariantCulture)
+  if ($State.lastDailySummaryKey -eq $key) { return }
+  $cutoffUtc = [TimeZoneInfo]::ConvertTimeToUtc($cutoffNy,$nyZone)
+  if (-not $Ledger.updatedAt -or ([DateTimeOffset]::Parse([string]$Ledger.updatedAt)).UtcDateTime -lt $cutoffUtc.AddMinutes(1)) {
+    Write-Warning "V2 daily summary for $key is waiting for the worker to scan the 17:00 New York close."
+    return
+  }
+  $message = Get-V2DailySummary $Ledger $cutoffNy
+  $null = Send-Slack $message
+  $State.lastDailySummaryKey = $key
+  Save-State $State
+  Write-Host "Posted V2 daily Slack summary for $key."
+}
+
 function Scan-Once {
   $ledger = Read-Ledger
   $snapshot = Get-Snapshot $ledger
@@ -391,6 +412,7 @@ function Scan-Once {
     $state.seenClosed = @($seenClosed); Save-State $state
   }
   Refresh-OteStatus $state $snapshot $ledger
+  Send-DailySummaryIfDue $state $ledger
 }
 
 if ($TestSend) {
