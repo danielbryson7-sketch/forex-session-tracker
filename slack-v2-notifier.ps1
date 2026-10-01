@@ -21,6 +21,13 @@ if (-not $DryRun -and -not $script:threadedMode -and ($script:slackWebhookUrl -n
 if (-not $DryRun -and -not $script:threadedMode -and ($script:slackBotToken -or $script:slackChannelId)) {
   throw 'Threaded Slack alerts need both SLACK_BOT_TOKEN and SLACK_CHANNEL_ID.'
 }
+$script:oandaToken = [string]$env:OANDA_API_TOKEN
+$script:oandaEnvironment = if ($env:OANDA_ENVIRONMENT -eq 'live') { 'live' } else { 'practice' }
+if ($script:threadedMode -and (Test-Path (Join-Path $PSScriptRoot 'credentials-v2.local.ps1'))) {
+  . (Join-Path $PSScriptRoot 'credentials-v2.local.ps1')
+  $script:oandaToken = [string]$script:token
+  $script:oandaEnvironment = [string]$script:environment
+}
 
 function Format-NyTime($Value) {
   if (-not $Value) { return 'unknown time' }
@@ -52,6 +59,54 @@ function Send-Slack([string]$Message,[string]$ThreadTs = '') {
   $result = Invoke-WebRequest -Uri $script:slackWebhookUrl -Method Post -ContentType 'application/json; charset=utf-8' -Body $body -TimeoutSec 20 -UseBasicParsing
   if ($result.StatusCode -ne 200 -or [string]$result.Content -ne 'ok') { throw 'Slack did not accept the notification.' }
   return $null
+}
+
+function Get-TradeChart($Position) {
+  if (-not $script:oandaToken) { throw 'OANDA token is unavailable for the Slack chart.' }
+  $pair = [string]$Position.pair
+  if ($pair -notmatch '^[A-Z]{3}/[A-Z]{3}$') { throw 'Invalid forex pair for the Slack chart.' }
+  $entry = [DateTimeOffset]::Parse([string]$Position.entryTime)
+  $chartDir = Join-Path $PSScriptRoot 'data/slack-charts'
+  [IO.Directory]::CreateDirectory($chartDir) | Out-Null
+  $stem = "$($pair.Replace('/',''))-$($entry.ToUnixTimeSeconds())"
+  $jsonPath = Join-Path $chartDir "$stem.json"
+  $pngPath = Join-Path $chartDir "$stem.png"
+  if (Test-Path $pngPath) { return $pngPath }
+  $hostName = if ($script:oandaEnvironment -eq 'live') { 'api-fxtrade.oanda.com' } else { 'api-fxpractice.oanda.com' }
+  $from = [uri]::EscapeDataString($entry.AddHours(-4).AddMinutes(-45).UtcDateTime.ToString('o'))
+  $to = [uri]::EscapeDataString($entry.AddMinutes(15).AddSeconds(1).UtcDateTime.ToString('o'))
+  $instrument = $pair.Replace('/','_')
+  $url = "https://$hostName/v3/instruments/$instrument/candles?price=BA&granularity=M15&from=$from&to=$to"
+  $headers = @{ Authorization="Bearer $($script:oandaToken)"; 'Accept-Datetime-Format'='RFC3339' }
+  $response = Invoke-RestMethod -Uri $url -Headers $headers -TimeoutSec 25
+  $bars = @($response.candles | Where-Object { $_.complete -and $_.bid } | ForEach-Object {
+    @{ time=[string]$_.time; open=[double]$_.bid.o; high=[double]$_.bid.h; low=[double]$_.bid.l; close=[double]$_.bid.c }
+  })
+  if ($bars.Count -lt 2) { throw "OANDA returned fewer than two completed M15 bars for $pair." }
+  $chart = @{ pair=$pair; direction=$Position.direction; signalTime=$Position.signalTime; entryTime=$Position.entryTime;
+    entryTarget=$Position.entryTarget; zoneLow=$Position.entryZoneLow; zoneHigh=$Position.entryZoneHigh; bars=$bars }
+  [IO.File]::WriteAllText($jsonPath,($chart | ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
+  try {
+    $renderer = Join-Path $PSScriptRoot 'render-slack-trade-chart.py'
+    & python3 $renderer $jsonPath $pngPath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $pngPath)) { throw "Could not render the $pair trade chart." }
+  } finally { Remove-Item -LiteralPath $jsonPath -ErrorAction SilentlyContinue }
+  return $pngPath
+}
+
+function Send-SlackChart([string]$Message,[string]$ThreadTs,[string]$ChartPath,[string]$Pair) {
+  if ($DryRun) { Write-Host "DRY RUN chart in thread $ThreadTs : $ChartPath"; return }
+  $bytes = [IO.File]::ReadAllBytes($ChartPath)
+  $headers = @{ Authorization="Bearer $($script:slackBotToken)" }
+  $filename = [IO.Path]::GetFileName($ChartPath)
+  $first = Invoke-RestMethod -Uri 'https://slack.com/api/files.getUploadURLExternal' -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body (@{ filename=$filename; length=$bytes.Length; alt_txt="$Pair M15 candles, OTE zone and signal candle at trade entry" } | ConvertTo-Json -Compress) -TimeoutSec 20
+  if (-not $first.ok -or -not $first.upload_url -or -not $first.file_id) { throw "Slack file upload initialization failed: $($first.error)" }
+  $upload = Invoke-WebRequest -Uri ([string]$first.upload_url) -Method Post -Body $bytes -ContentType 'image/png' -TimeoutSec 30 -UseBasicParsing
+  if ($upload.StatusCode -ne 200) { throw 'Slack did not accept the chart bytes.' }
+  $complete = @{ files=@(@{ id=[string]$first.file_id; title="$Pair M15 entry chart" }); channel_id=$script:slackChannelId;
+    thread_ts=$ThreadTs; initial_comment=$Message } | ConvertTo-Json -Depth 5 -Compress
+  $last = Invoke-RestMethod -Uri 'https://slack.com/api/files.completeUploadExternal' -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $complete -TimeoutSec 30
+  if (-not $last.ok) { throw "Slack chart share failed: $($last.error)" }
 }
 
 function Save-State($State) {
@@ -167,7 +222,15 @@ function Scan-Once {
     if ($seenOpen.Contains($key)) { continue }
     $position = $snapshot.open[$key]
     $parentTs = if ($script:threadedMode) { Ensure-Thread $state $position.pair $position } else { '' }
-    $null = Send-Slack (Message-Open $position) $parentTs
+    if ($script:threadedMode -and -not $DryRun) {
+      try {
+        $chartPath = Get-TradeChart $position
+        Send-SlackChart (Message-Open $position) $parentTs $chartPath $position.pair
+      } catch {
+        Write-Warning "Slack chart failed for $($position.pair): $($_.Exception.Message). Posting the entry text instead."
+        $null = Send-Slack (Message-Open $position) $parentTs
+      }
+    } else { $null = Send-Slack (Message-Open $position) $parentTs }
     [void]$seenOpen.Add($key)
     $state.seenOpen = @($seenOpen); Save-State $state
   }
