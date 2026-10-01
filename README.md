@@ -41,6 +41,8 @@ For threaded Slack alerts with trade charts, add the `chat:write` and `files:wri
 
 At 17:00 New York on weekdays, the same notifier posts a daily V2 paper-trading report after the worker has recorded the closing bar. It shows the just-finished trading day and week to date, with entries, closed trades, win rate, gross gained and lost pips, net pips, and pair tables sorted by net pips. Only prospective `live`-origin ledger trades count; historical replay and unrealized open pips are excluded. The week starts Sunday at 17:00 New York. The report's date is saved in `data/slack-v2-state.json` to prevent duplicate posts after restarts.
 
+With bot-token Slack access, the daily report also posts a PNG progress chart for each pair with a live trade active during that trading day. It compares the pair's realized net pips with the distance, in pips, from its frozen trade OTE zone to its completed 17:00 M15 close. For example, +35 net pips and a 100-pip zone distance fills 35% of the bar. Losses appear as red bars, open trades add no realized pips, and a missing completed close is labeled rather than estimated. Bars cap visually at 100%, while the percentage label can exceed 100% after multiple trades or an intraday reversal.
+
 ## Optional data and tools
 
 - `/qqq` hosts a separate QQQ backtest viewer. Historical aggregates are omitted from Git. Supply a licensed `data/qqq-source.json` with `bars` containing Massive-style `t`, `o`, `h`, `l`, and `c` fields, then run `pwsh -NoProfile -File ./build-qqq-backtest.ps1`. It writes the ignored `data/qqq-backtest-6mo.json` used by the page. It models QQQ price points, not option P/L.

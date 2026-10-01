@@ -82,3 +82,53 @@ function Format-V2SummaryTable($Trades) {
   $lines += '```'
   return ($lines -join "`n")
 }
+
+function Get-V2DailyProgress($Ledger,[datetime]$CutoffNy) {
+  $ny = [TimeZoneInfo]::FindSystemTimeZoneById('America/New_York')
+  $endNy = [datetime]::SpecifyKind($CutoffNy,[DateTimeKind]::Unspecified)
+  $startUtc = [TimeZoneInfo]::ConvertTimeToUtc($endNy.AddDays(-1),$ny)
+  $endUtc = [TimeZoneInfo]::ConvertTimeToUtc($endNy,$ny)
+  $trades = @($Ledger.trades | Where-Object {
+    $_.origin -eq 'live' -and $_.entryTime -and
+      ([DateTimeOffset]::Parse([string]$_.entryTime)).UtcDateTime -le $endUtc -and
+      (([DateTimeOffset]::Parse([string]$_.entryTime)).UtcDateTime -gt $startUtc -or
+        ($_.exitTime -and ([DateTimeOffset]::Parse([string]$_.exitTime)).UtcDateTime -gt $startUtc))
+  })
+  $open = @($Ledger.pairs.Keys | ForEach-Object { $Ledger.pairs[$_].position } | Where-Object {
+    $_ -and $_.origin -eq 'live' -and $_.entryTime -and
+      ([DateTimeOffset]::Parse([string]$_.entryTime)).UtcDateTime -le $endUtc
+  })
+  $entries = @($trades) + @($open)
+  $rows = @()
+  foreach ($group in @($entries | Group-Object pair)) {
+    $pair = [string]$group.Name
+    $state = $Ledger.pairs[$pair]
+    $sample = @($group.Group | Sort-Object entryTime -Descending)[0]
+    $pip = if ($pair.EndsWith('/JPY')) { 0.01 } else { 0.0001 }
+    $zoneLow = [double]$sample.entryZoneLow
+    $zoneHigh = [double]$sample.entryZoneHigh
+    $close = $null; $distance = $null; $side = 'no close'
+    if ($state -and $state.lastBar -and $null -ne $state.lastClose) {
+      $barTime = ([DateTimeOffset]::Parse([string]$state.lastBar)).UtcDateTime
+      if ($barTime -ge $endUtc.AddMinutes(-15) -and $barTime -lt $endUtc) {
+        $close = [double]$state.lastClose
+        if ($close -lt $zoneLow) { $distance = ($zoneLow-$close)/$pip; $side = 'below' }
+        elseif ($close -gt $zoneHigh) { $distance = ($close-$zoneHigh)/$pip; $side = 'above' }
+        else { $distance = 0.0; $side = 'inside' }
+      }
+    }
+    $net = 0.0; $closed = 0
+    foreach ($trade in $group.Group) {
+      if ($trade.exitTime -and ([DateTimeOffset]::Parse([string]$trade.exitTime)).UtcDateTime -le $endUtc) {
+        $net += [double]$trade.netPips; $closed++
+      }
+    }
+    $rows += @{ pair=$pair; trades=$group.Count; closed=$closed; netPips=[Math]::Round($net,1);
+      zoneLow=$zoneLow; zoneHigh=$zoneHigh; close=$close;
+      distancePips=if ($null -ne $distance) { [Math]::Round($distance,1) } else { $null };
+      side=$side }
+  }
+  $rows = @($rows | Sort-Object @{Expression='netPips';Descending=$true},@{Expression='pair';Descending=$false})
+  return @{ date=$endNy.ToString('ddd MMM d, yyyy',[Globalization.CultureInfo]::InvariantCulture);
+    cutoffNy=$endNy.ToString('yyyy-MM-dd HH:mm'); rows=$rows }
+}

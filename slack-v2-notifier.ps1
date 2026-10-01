@@ -133,6 +133,35 @@ function Send-SlackChart([string]$Message,[string]$ThreadTs,[string]$ChartPath,[
   if (-not $last.ok) { throw "Slack chart share failed: $($last.error)" }
 }
 
+function Send-SlackDailyProgress($Report,[string]$Key) {
+  if (-not $script:threadedMode) {
+    Write-Warning 'The daily OTE progress image needs a Slack bot token and channel ID.'
+    return
+  }
+  $chartDir = Join-Path $PSScriptRoot 'data/slack-charts'
+  [IO.Directory]::CreateDirectory($chartDir) | Out-Null
+  $jsonPath = Join-Path $chartDir "daily-progress-$Key.json"
+  $pngPath = Join-Path $chartDir "daily-progress-$Key.png"
+  [IO.File]::WriteAllText($jsonPath,($Report | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+  try {
+    & python3 (Join-Path $PSScriptRoot 'render-daily-progress.py') $jsonPath $pngPath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $pngPath)) { throw 'Could not render the daily OTE progress chart.' }
+  } finally { Remove-Item -LiteralPath $jsonPath -ErrorAction SilentlyContinue }
+  if ($DryRun) { Write-Host "DRY RUN daily OTE progress chart: $pngPath"; return }
+  $bytes = [IO.File]::ReadAllBytes($pngPath)
+  $headers = @{ Authorization="Bearer $($script:slackBotToken)" }
+  $first = Invoke-RestMethod -Uri 'https://slack.com/api/files.getUploadURLExternal' -Method Post -Headers $headers -ContentType 'application/x-www-form-urlencoded' -Body @{
+    filename=[IO.Path]::GetFileName($pngPath); length=[string]$bytes.Length; alt_txt='Daily OTE distance and pip capture progress by traded forex pair'
+  } -TimeoutSec 20
+  if (-not $first.ok -or -not $first.upload_url -or -not $first.file_id) { throw "Slack daily chart upload initialization failed: $($first.error)" }
+  $upload = Invoke-WebRequest -Uri ([string]$first.upload_url) -Method Post -Body $bytes -ContentType 'image/png' -TimeoutSec 30 -UseBasicParsing
+  if ($upload.StatusCode -ne 200) { throw 'Slack did not accept the daily chart bytes.' }
+  $payload = @{ files=@(@{ id=[string]$first.file_id; title="Daily OTE progress $Key" }); channel_id=$script:slackChannelId;
+    initial_comment=":bar_chart: *Daily OTE distance and pips captured — $Key*" } | ConvertTo-Json -Depth 5 -Compress
+  $last = Invoke-RestMethod -Uri 'https://slack.com/api/files.completeUploadExternal' -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $payload -TimeoutSec 30
+  if (-not $last.ok) { throw "Slack daily chart share failed: $($last.error)" }
+}
+
 function Save-State($State) {
   if ($DryRun) { return }
   $directory = Split-Path -Parent $StatePath
@@ -336,17 +365,40 @@ function Send-DailySummaryIfDue($State,$Ledger) {
   $cutoffNy = $local.Date.AddHours(17)
   if ($local.DateTime -lt $cutoffNy.AddMinutes(3)) { return }
   $key = $cutoffNy.ToString('yyyy-MM-dd',[Globalization.CultureInfo]::InvariantCulture)
-  if ($State.lastDailySummaryKey -eq $key) { return }
+  if ($State.lastDailySummaryKey -eq $key) {
+    if ($script:threadedMode -and $State.lastDailyChartKey -ne $key -and $State.lastDailyChartData) {
+      try {
+        Send-SlackDailyProgress $State.lastDailyChartData $key
+        $State.lastDailyChartKey = $key
+        Save-State $State
+        Write-Host "Posted V2 daily OTE progress chart for $key."
+      } catch { Write-Warning "Daily OTE progress chart for $key failed: $($_.Exception.Message)" }
+    }
+    return
+  }
   $cutoffUtc = [TimeZoneInfo]::ConvertTimeToUtc($cutoffNy,$nyZone)
   if (-not $Ledger.updatedAt -or ([DateTimeOffset]::Parse([string]$Ledger.updatedAt)).UtcDateTime -lt $cutoffUtc.AddMinutes(1)) {
     Write-Warning "V2 daily summary for $key is waiting for the worker to scan the 17:00 New York close."
     return
   }
   $message = Get-V2DailySummary $Ledger $cutoffNy
+  $chartData = Get-V2DailyProgress $Ledger $cutoffNy
   $null = Send-Slack $message
   $State.lastDailySummaryKey = $key
+  $State.lastDailyChartData = $chartData
   Save-State $State
   Write-Host "Posted V2 daily Slack summary for $key."
+  if ($script:threadedMode -and @($chartData.rows).Count) {
+    try {
+      Send-SlackDailyProgress $chartData $key
+      $State.lastDailyChartKey = $key
+      Save-State $State
+      Write-Host "Posted V2 daily OTE progress chart for $key."
+    } catch { Write-Warning "Daily OTE progress chart for $key failed: $($_.Exception.Message)" }
+  } else {
+    $State.lastDailyChartKey = $key
+    Save-State $State
+  }
 }
 
 function Scan-Once {
