@@ -31,7 +31,7 @@ if [[ "${ENABLE_HOURLY_EMAIL:-0}" == "1" ]]; then
   children+=("$!")
 fi
 
-if [[ -f slack-credentials.local.ps1 || -n "${SLACK_WEBHOOK_URL:-}" ]]; then
+if [[ -f slack-credentials.local.ps1 || -n "${SLACK_WEBHOOK_URL:-}" || ( -n "${SLACK_BOT_TOKEN:-}" && -n "${SLACK_CHANNEL_ID:-}" ) ]]; then
   pwsh -NoProfile -File ./slack-v2-notifier.ps1 >> data/slack-v2-notifier.log 2>&1 &
   children+=("$!")
   echo 'V2 Slack trade alerts: enabled.'

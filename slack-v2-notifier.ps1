@@ -10,10 +10,16 @@ param(
 $ErrorActionPreference = 'Stop'
 $nyZone = [TimeZoneInfo]::FindSystemTimeZoneById('America/New_York')
 $script:slackWebhookUrl = [string]$env:SLACK_WEBHOOK_URL
+$script:slackBotToken = [string]$env:SLACK_BOT_TOKEN
+$script:slackChannelId = [string]$env:SLACK_CHANNEL_ID
 $privatePath = Join-Path $PSScriptRoot 'slack-credentials.local.ps1'
 if (Test-Path $privatePath) { . $privatePath }
-if (-not $DryRun -and ($script:slackWebhookUrl -notmatch '^https://hooks\.slack\.com/services/[^/]+/[^/]+/[^/]+$')) {
-  throw 'Set a Slack incoming webhook in the ignored slack-credentials.local.ps1 file or SLACK_WEBHOOK_URL.'
+$script:threadedMode = -not [string]::IsNullOrWhiteSpace($script:slackBotToken) -and -not [string]::IsNullOrWhiteSpace($script:slackChannelId)
+if (-not $DryRun -and -not $script:threadedMode -and ($script:slackWebhookUrl -notmatch '^https://hooks\.slack\.com/services/[^/]+/[^/]+/[^/]+$')) {
+  throw 'Set SLACK_BOT_TOKEN and SLACK_CHANNEL_ID for threaded alerts, or set a Slack incoming webhook for flat alerts.'
+}
+if (-not $DryRun -and -not $script:threadedMode -and ($script:slackBotToken -or $script:slackChannelId)) {
+  throw 'Threaded Slack alerts need both SLACK_BOT_TOKEN and SLACK_CHANNEL_ID.'
 }
 
 function Format-NyTime($Value) {
@@ -26,11 +32,26 @@ function Format-Price([string]$Pair,$Value) {
   return ([double]$Value).ToString("F$digits",[Globalization.CultureInfo]::InvariantCulture)
 }
 
-function Send-Slack([string]$Message) {
-  if ($DryRun) { Write-Host "DRY RUN: $Message"; return }
+function Send-Slack([string]$Message,[string]$ThreadTs = '') {
+  if ($DryRun) {
+    Write-Host "DRY RUN ($ThreadTs): $Message"
+    return @{ ts='dry-run-parent'; channel='dry-run-channel' }
+  }
+  if ($script:threadedMode) {
+    $payload = @{ channel=$script:slackChannelId; text=$Message; unfurl_links=$false }
+    if ($ThreadTs) { $payload.thread_ts = $ThreadTs }
+    $body = $payload | ConvertTo-Json -Compress -Depth 4
+    $headers = @{ Authorization = "Bearer $($script:slackBotToken)" }
+    $response = Invoke-RestMethod -Uri 'https://slack.com/api/chat.postMessage' -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $body -TimeoutSec 20
+    if (-not $response.ok -or -not $response.ts -or -not $response.channel) {
+      throw "Slack chat.postMessage failed: $($response.error)"
+    }
+    return @{ ts=[string]$response.ts; channel=[string]$response.channel }
+  }
   $body = @{ text = $Message } | ConvertTo-Json -Compress -Depth 4
   $result = Invoke-WebRequest -Uri $script:slackWebhookUrl -Method Post -ContentType 'application/json; charset=utf-8' -Body $body -TimeoutSec 20 -UseBasicParsing
   if ($result.StatusCode -ne 200 -or [string]$result.Content -ne 'ok') { throw 'Slack did not accept the notification.' }
+  return $null
 }
 
 function Save-State($State) {
@@ -74,9 +95,31 @@ function Get-Snapshot($Ledger) {
 }
 
 function Message-Arm([string]$Pair,$Pending) {
-  $side = if ([int]$Pending.direction -eq 1) { 'LONG' } else { 'SHORT' }
+  $side = if ([string]$Pending.direction -in @('1','long','LONG')) { 'LONG' } else { 'SHORT' }
   $entry = Format-Price $Pair $Pending.entry
   return ":large_orange_diamond: *$Pair armed $side* · $(Format-NyTime $Pending.signalTime)`n70.5% entry waiting at $entry · signal close $(Format-Price $Pair $Pending.signalPrice)"
+}
+
+function Get-ArmKey([string]$Pair,$Item) {
+  return "$Pair|$($Item.signalTime)"
+}
+
+function Get-ArmFromTrade($Trade) {
+  return @{ direction=if ([string]$Trade.direction -eq 'long') { 1 } else { -1 }; signalTime=$Trade.signalTime;
+    signalPrice=$Trade.signalPrice; entry=$Trade.entryTarget }
+}
+
+function Ensure-Thread($State,[string]$Pair,$Trade) {
+  $armKey = Get-ArmKey $Pair $Trade
+  if (-not $armKey -or -not $Trade.signalTime) { throw "Cannot thread $Pair trade without its signal time." }
+  if (-not $State.threads) { $State.threads = @{} }
+  if ($State.threads.ContainsKey($armKey)) { return [string]$State.threads[$armKey].ts }
+  $arm = Get-ArmFromTrade $Trade
+  $posted = Send-Slack (Message-Arm $Pair $arm)
+  if (-not $posted.ts) { throw "Slack did not return a parent timestamp for $Pair." }
+  $State.threads[$armKey] = @{ ts=$posted.ts; channel=$posted.channel }
+  Save-State $State
+  return [string]$posted.ts
 }
 
 function Message-Open($Position) {
@@ -97,38 +140,49 @@ function Message-Close($Trade) {
 function Scan-Once {
   $snapshot = Get-Snapshot (Read-Ledger)
   if (-not (Test-Path $StatePath)) {
-    $state = @{ seenClosed=@($snapshot.closed.Keys); seenOpen=@($snapshot.open.Keys); seenArm=@($snapshot.armed.Keys); initializedAt=[DateTimeOffset]::UtcNow.ToString('o') }
+    $state = @{ seenClosed=@($snapshot.closed.Keys); seenOpen=@($snapshot.open.Keys); seenArm=@($snapshot.armed.Keys); threads=@{}; initializedAt=[DateTimeOffset]::UtcNow.ToString('o') }
     Save-State $state
     Write-Host 'Slack V2 notifier initialized from current ledger; old trades will not be reposted.'
     return
   }
   $state = Get-Content -Raw $StatePath | ConvertFrom-Json -AsHashtable -DateKind String
+  if (-not $state.threads) { $state.threads = @{} }
   $seenClosed = [Collections.Generic.HashSet[string]]::new([string[]]@($state.seenClosed))
   $seenOpen = [Collections.Generic.HashSet[string]]::new([string[]]@($state.seenOpen))
   $seenArm = [Collections.Generic.HashSet[string]]::new([string[]]@($state.seenArm))
   foreach ($key in @($snapshot.armed.Keys | Sort-Object)) {
     if ($seenArm.Contains($key)) { continue }
     $item = $snapshot.armed[$key]
-    Send-Slack (Message-Arm $item.pair $item.pending)
+    if ($script:threadedMode) {
+      if (-not $state.threads.ContainsKey($key)) {
+        $posted = Send-Slack (Message-Arm $item.pair $item.pending)
+        $state.threads[$key] = @{ ts=$posted.ts; channel=$posted.channel }
+        Save-State $state
+      }
+    } else { $null = Send-Slack (Message-Arm $item.pair $item.pending) }
     [void]$seenArm.Add($key)
     $state.seenArm = @($seenArm); Save-State $state
   }
   foreach ($key in @($snapshot.open.Keys | Sort-Object)) {
     if ($seenOpen.Contains($key)) { continue }
-    Send-Slack (Message-Open $snapshot.open[$key])
+    $position = $snapshot.open[$key]
+    $parentTs = if ($script:threadedMode) { Ensure-Thread $state $position.pair $position } else { '' }
+    $null = Send-Slack (Message-Open $position) $parentTs
     [void]$seenOpen.Add($key)
     $state.seenOpen = @($seenOpen); Save-State $state
   }
   foreach ($key in @($snapshot.closed.Keys | Sort-Object)) {
     if ($seenClosed.Contains($key)) { continue }
-    Send-Slack (Message-Close $snapshot.closed[$key])
+    $trade = $snapshot.closed[$key]
+    $parentTs = if ($script:threadedMode) { Ensure-Thread $state $trade.pair $trade } else { '' }
+    $null = Send-Slack (Message-Close $trade) $parentTs
     [void]$seenClosed.Add($key)
     $state.seenClosed = @($seenClosed); Save-State $state
   }
 }
 
 if ($TestSend) {
-  Send-Slack ':satellite: V2 forex Slack connection is working. Future live arm, entry, and exit events will appear here.'
+  $null = Send-Slack ':satellite: V2 forex Slack connection is working. Future live arm, entry, and exit events will appear here.'
   return
 }
 
