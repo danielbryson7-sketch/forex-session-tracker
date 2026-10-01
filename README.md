@@ -37,6 +37,8 @@ The dashboard's chart refreshes around M15 boundaries; the selected pair's formi
 
 To enable hourly email, set `GMAIL_FROM`, `GMAIL_TO`, and `GMAIL_APP_PASSWORD` in your environment, or use the ignored `mail-credentials.local.ps1` for the app password, then start with `ENABLE_HOURLY_EMAIL=1 ./start.sh`. The mail process reads the **V2** ledger and V2 server, sends at the top of each hour, and records the last sent hour to avoid duplicates. `pwsh -NoProfile -File ./hourly-paper-email.ps1 -Preview` writes a local HTML preview without sending.
 
+For Slack alerts, create a Slack incoming webhook for a channel in your workspace. Set `SLACK_WEBHOOK_URL` locally or copy `slack-credentials.local.ps1.example` to the ignored `slack-credentials.local.ps1`, fill in the URL, and restrict the file to your user (`chmod 600`). When credentials are present, `./start.sh` starts `slack-v2-notifier.ps1`. It posts **new live forex** arming, entry, and exit events, and baselines existing history on first launch so old replay rows are not sent. It checks the V2 ledger every 20 seconds. The webhook is a secret: never commit or share its URL. `pwsh -NoProfile -File ./slack-v2-notifier.ps1 -TestSend` sends a connection check.
+
 ## Optional data and tools
 
 - `/qqq` hosts a separate QQQ backtest viewer. Historical aggregates are omitted from Git. Supply a licensed `data/qqq-source.json` with `bars` containing Massive-style `t`, `o`, `h`, `l`, and `c` fields, then run `pwsh -NoProfile -File ./build-qqq-backtest.ps1`. It writes the ignored `data/qqq-backtest-6mo.json` used by the page. It models QQQ price points, not option P/L.

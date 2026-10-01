@@ -2,6 +2,7 @@
 credentials*.local.ps1
 mail-credentials.local.ps1
 .massive-api-key.local
+slack-credentials.local.ps1
 .env
 .env.*
 data/

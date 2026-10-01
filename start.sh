@@ -31,6 +31,12 @@ if [[ "${ENABLE_HOURLY_EMAIL:-0}" == "1" ]]; then
   children+=("$!")
 fi
 
+if [[ -f slack-credentials.local.ps1 || -n "${SLACK_WEBHOOK_URL:-}" ]]; then
+  pwsh -NoProfile -File ./slack-v2-notifier.ps1 >> data/slack-v2-notifier.log 2>&1 &
+  children+=("$!")
+  echo 'V2 Slack trade alerts: enabled.'
+fi
+
 echo 'V2 dashboard: http://127.0.0.1:8771/'
 echo 'Worker: completed M15 candles, scanned at each 15-minute boundary plus 20 seconds.'
 if [[ "${ENABLE_PRACTICE_ORDERS:-0}" == "1" ]]; then
