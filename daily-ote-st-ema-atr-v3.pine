@@ -1,0 +1,618 @@
+//@version=6
+indicator("Daily OTE + Supertrend + EMA/ATR Filter (28-Pair Table)", overlay = false,
+     max_lines_count = 500, max_labels_count = 500)
+
+// Apply to standard candles. Trade signals are calculated on M15 only.
+fibColor = input.color(color.teal, "Fib color", group = "Fibonacci")
+oteColor = input.color(color.orange, "OTE color", group = "Fibonacci")
+fibWidth = input.int(1, "Fib width", minval = 1, maxval = 4, group = "Fibonacci")
+atrLength = input.int(10, "Daily ATR length", minval = 1, group = "Supertrend")
+factor = input.float(3.0, "Daily multiplier", minval = 0.1, step = 0.1, group = "Supertrend")
+showST = input.bool(true, "Show daily Supertrend", group = "Supertrend")
+showBG = input.bool(true, "Show daily bias background", group = "Supertrend")
+bgTransparency = input.int(85, "Background transparency", minval = 0, maxval = 100, group = "Supertrend")
+showTradeLevels = input.bool(true, "Show frozen entry / TP / SL", group = "Trades")
+keepTrades = input.int(80, "Completed trades to retain", minval = 1, maxval = 100, group = "Trades")
+maxAtrRatio = input.float(1.4, "Maximum ATR14 / ATR50 at arm", minval = 0.1, step = 0.05, group = "Arm filters")
+historyDays = input.int(10, "Days in chart and table", minval = 1, maxval = 30, group = "Display")
+showPairTable = input.bool(true, "Show 28-pair table", group = "Display")
+tableFontSize = input.int(20, "Table text size", minval = 12, maxval = 36, group = "Display")
+historyStart = last_bar_time - historyDays * 24 * 60 * 60 * 1000
+inHistory = time >= historyStart
+
+if timeframe.in_seconds() > timeframe.in_seconds("1D")
+    runtime.error("Use daily or lower timeframes. Use M15 for trade signals.")
+
+isM15 = timeframe.isminutes and timeframe.multiplier == 15
+newDay = timeframe.change("1D")
+// New York local-time entry windows. Extend London open back to midnight.
+inLondonOpen = not na(time(timeframe.period, "0000-0500", "America/New_York"))
+inNewYorkOpen = not na(time(timeframe.period, "0700-1000", "America/New_York"))
+inLondonClose = not na(time(timeframe.period, "1000-1200", "America/New_York"))
+killZone = inLondonOpen ? 1 : inNewYorkOpen ? 2 : inLondonClose ? 3 : 0
+
+// Build the completed daily candle and developing daily Supertrend from the
+// same M15 bars used by the 28-pair scanner. Native D1 OHLC can differ from
+// aggregated M15 OHLC by several pips, changing signals and table results.
+var float dayOpen = na
+var float dayHigh = na
+var float dayLow = na
+var float dayClose = na
+var float fibOpen = na
+var float fibHigh = na
+var float fibLow = na
+var float fibClose = na
+var float olderDayClose = na
+var float priorATR = na
+var float atrSeedSum = 0.0
+var int atrDays = 0
+var float priorUpper = na
+var float priorLower = na
+var int priorDirection = 1
+var bool completeSession = false
+// The table requests 3,500 M15 bars per pair. Seed the chart's daily state
+// from that same depth so a chart with more history does not disagree with it.
+chartSeedBar = math.max(0, last_bar_index - 3499)
+if bar_index == chartSeedBar
+    dayOpen := na
+    dayHigh := na
+    dayLow := na
+    dayClose := na
+    fibOpen := na
+    fibHigh := na
+    fibLow := na
+    fibClose := na
+    olderDayClose := na
+    priorATR := na
+    atrSeedSum := 0.0
+    atrDays := 0
+    priorUpper := na
+    priorLower := na
+    priorDirection := 1
+    completeSession := false
+if na(dayOpen)
+    dayOpen := open
+    dayHigh := high
+    dayLow := low
+    dayClose := close
+    completeSession := time == time("1D")
+else if newDay
+    fibOpen := dayOpen
+    fibHigh := dayHigh
+    fibLow := dayLow
+    fibClose := dayClose
+    completedTR = na(olderDayClose) ? fibHigh - fibLow :
+         math.max(fibHigh - fibLow,
+         math.max(math.abs(fibHigh - olderDayClose), math.abs(fibLow - olderDayClose)))
+    atrDays += 1
+    wasReady = not na(priorATR)
+    if atrDays < atrLength
+        atrSeedSum += completedTR
+    else if atrDays == atrLength
+        atrSeedSum += completedTR
+        priorATR := atrSeedSum / atrLength
+    else
+        priorATR := (priorATR * (atrLength - 1) + completedTR) / atrLength
+    if not na(priorATR)
+        completedUpper = (fibHigh + fibLow) / 2 + factor * priorATR
+        completedLower = (fibHigh + fibLow) / 2 - factor * priorATR
+        oldUpper = nz(priorUpper, completedUpper)
+        oldLower = nz(priorLower, completedLower)
+        completedUpper := completedUpper < oldUpper or olderDayClose > oldUpper ? completedUpper : oldUpper
+        completedLower := completedLower > oldLower or olderDayClose < oldLower ? completedLower : oldLower
+        priorDirection := not wasReady ? 1 : priorDirection < 0 ?
+             (fibClose < completedLower ? 1 : -1) :
+             (fibClose > completedUpper ? -1 : 1)
+        priorUpper := completedUpper
+        priorLower := completedLower
+    olderDayClose := fibClose
+    dayOpen := open
+    dayHigh := high
+    dayLow := low
+    dayClose := close
+    completeSession := time == time("1D")
+else
+    dayHigh := math.max(dayHigh, high)
+    dayLow := math.min(dayLow, low)
+    dayClose := close
+
+ready = completeSession and not na(priorATR) and not na(fibClose)
+int bias = 0
+float dailyST = na
+if ready
+    developingTR = math.max(dayHigh - dayLow,
+         math.max(math.abs(dayHigh - fibClose), math.abs(dayLow - fibClose)))
+    dayATR = (priorATR * (atrLength - 1) + developingTR) / atrLength
+    dailyUpper = (dayHigh + dayLow) / 2 + factor * dayATR
+    dailyLower = (dayHigh + dayLow) / 2 - factor * dayATR
+    dailyUpper := dailyUpper < priorUpper or fibClose > priorUpper ? dailyUpper : priorUpper
+    dailyLower := dailyLower > priorLower or fibClose < priorLower ? dailyLower : priorLower
+    dailyDirection = priorDirection < 0 ?
+         (close < dailyLower ? 1 : -1) : (close > dailyUpper ? -1 : 1)
+    bias := dailyDirection < 0 ? 1 : -1
+    dailyST := dailyDirection < 0 ? dailyLower : dailyUpper
+
+plot(showST and inHistory and bias == 1 ? dailyST : na, "Daily ST bullish",
+     color.blue, 2, plot.style_linebr, force_overlay = true)
+plot(showST and inHistory and bias == -1 ? dailyST : na, "Daily ST bearish",
+     color.red, 2, plot.style_linebr, force_overlay = true)
+bgcolor(showBG and inHistory and bias != 0 ? color.new(bias == 1 ? color.blue : color.red, bgTransparency) : na,
+     force_overlay = true)
+
+// Yesterday's completed M15-aggregated candle supplies today's fixed levels.
+
+// No Fibonacci labels; each set covers its destination trading session only.
+var ratios = array.from(0.0, 0.5, 0.62, 0.705, 0.79, 1.0)
+var fibLines = array.new_line()
+drawFib(float o, float c, float lo, float hi, int t1, int t2) =>
+    if not na(lo)
+        start = c > o ? hi : lo
+        finish = c > o ? lo : hi
+        for r in ratios
+            p = start + (finish - start) * r
+            id = line.new(t1, p, t2, p, xloc = xloc.bar_time,
+                 color = r >= 0.62 and r <= 0.79 ? oteColor : fibColor,
+                 width = fibWidth, force_overlay = true)
+            array.push(fibLines, id)
+
+// Draw each completed prior-day fib set as its destination session starts.
+if inHistory and (newDay or not inHistory[1]) and not na(fibLow)
+    drawFib(fibOpen, fibClose, fibLow, fibHigh,
+         math.max(time("1D"), historyStart), time_close("1D"))
+if barstate.islast and array.size(fibLines) > 0
+    for i = array.size(fibLines) - 1 to 0
+        id = array.get(fibLines, i)
+        if line.get_x2(id) < historyStart
+            line.delete(id)
+            array.remove(fibLines, i)
+
+// Yesterday's color determines fib orientation; Supertrend sets trade bias.
+fibStart = fibClose > fibOpen ? fibHigh : fibLow
+fibEnd = fibClose > fibOpen ? fibLow : fibHigh
+p62 = fibStart + (fibEnd - fibStart) * 0.62
+p79 = fibStart + (fibEnd - fibStart) * 0.79
+p705 = fibStart + (fibEnd - fibStart) * 0.705
+zoneLow = math.min(p62, p79)
+zoneHigh = math.max(p62, p79)
+// Both filters are frozen at the completed arm candle. ATR50 is a volatility
+// baseline, not an extra take-profit or stop rule.
+armEma20 = ta.ema(close, 20)
+armEma50 = ta.ema(close, 50)
+armAtr14 = ta.atr(14)
+armAtr50 = ta.atr(50)
+armAtrRatio = armAtr14 / armAtr50
+
+type Trade
+    int direction
+    float entry
+    float target
+    float stop
+    line path
+    line entryLine
+    line targetLine
+    line stopLine
+
+var active = array.new<Trade>()
+var finishedLines = array.new_line()
+
+// OHLC cannot reveal the order of touches on an entry candle.
+// Model its path as O-L-H-C for a long, O-H-L-C for a short.
+// Only levels reached AFTER the midpoint fill can end the trade.
+entryBarExit(int dir, float entry, float target, float stop) =>
+    points = array.from(open, dir == 1 ? low : high, dir == 1 ? high : low, close)
+    bool filled = open == entry
+    float result = na
+    for j = 0 to 2
+        a = array.get(points, j)
+        b = array.get(points, j + 1)
+        if not filled and math.min(a, b) <= entry and math.max(a, b) >= entry
+            filled := true
+            a := entry
+        if filled and na(result)
+            hitStop = math.min(a, b) <= stop and math.max(a, b) >= stop
+            hitTarget = math.min(a, b) <= target and math.max(a, b) >= target
+            if hitStop or hitTarget
+                result := hitStop ? stop : target
+    result
+
+// One M15 request per pair. This scanner rebuilds each pair's D1 candle and
+// Supertrend from M15 bars, then runs the same setup and arm filters.
+// It avoids 28 additional D1 requests and keeps the table in a separate pane.
+scanPair() =>
+    dayChanged = timeframe.change("1D")
+    var float scanDayOpen = na
+    var float scanDayHigh = na
+    var float scanDayLow = na
+    var float scanDayClose = na
+    var float priorDayOpen = na
+    var float priorDayHigh = na
+    var float priorDayLow = na
+    var float priorDayClose = na
+    var float olderDayClose = na
+    var float priorATRScan = na
+    var float atrSeedSum = 0.0
+    var int atrDays = 0
+    var float priorUpperScan = na
+    var float priorLowerScan = na
+    var int priorDirectionScan = 1
+    var bool scanCompleteSession = false
+    var int scanEntriesToday = 0
+    var bool scanTouched = false
+    var int scanPendingBias = 0
+    var int scanSignalBar = na
+    var float scanPendingEntry = na
+    var float scanPendingHigh = na
+    var float scanPendingLow = na
+    var int scanActiveDir = 0
+    var int scanActiveTime = na
+    var float scanActiveEntry = na
+    var float scanActiveTP = na
+    var float scanActiveSL = na
+    var float scanClosedPips = 0.0
+    var scanClosedEntryTimes = array.new_int()
+    var scanClosedResults = array.new_float()
+    var int lastScanBias = 0
+    var int lastScanKillZone = 0
+    bool scanEntered = false
+
+    if na(scanDayOpen)
+        scanDayOpen := open
+        scanDayHigh := high
+        scanDayLow := low
+        scanDayClose := close
+        scanCompleteSession := time == time("1D")
+    else if dayChanged
+        priorDayOpen := scanDayOpen
+        priorDayHigh := scanDayHigh
+        priorDayLow := scanDayLow
+        priorDayClose := scanDayClose
+        completedTR = na(olderDayClose) ? priorDayHigh - priorDayLow :
+             math.max(priorDayHigh - priorDayLow,
+             math.max(math.abs(priorDayHigh - olderDayClose), math.abs(priorDayLow - olderDayClose)))
+        atrDays += 1
+        wasReady = not na(priorATRScan)
+        if atrDays < atrLength
+            atrSeedSum += completedTR
+        else if atrDays == atrLength
+            atrSeedSum += completedTR
+            priorATRScan := atrSeedSum / atrLength
+        else
+            priorATRScan := (priorATRScan * (atrLength - 1) + completedTR) / atrLength
+        if not na(priorATRScan)
+            completedUpper = (priorDayHigh + priorDayLow) / 2 + factor * priorATRScan
+            completedLower = (priorDayHigh + priorDayLow) / 2 - factor * priorATRScan
+            oldUpper = nz(priorUpperScan, completedUpper)
+            oldLower = nz(priorLowerScan, completedLower)
+            completedUpper := completedUpper < oldUpper or olderDayClose > oldUpper ? completedUpper : oldUpper
+            completedLower := completedLower > oldLower or olderDayClose < oldLower ? completedLower : oldLower
+            priorDirectionScan := not wasReady ? 1 : priorDirectionScan < 0 ?
+                 (priorDayClose < completedLower ? 1 : -1) :
+                 (priorDayClose > completedUpper ? -1 : 1)
+            priorUpperScan := completedUpper
+            priorLowerScan := completedLower
+        olderDayClose := priorDayClose
+        scanDayOpen := open
+        scanDayHigh := high
+        scanDayLow := low
+        scanDayClose := close
+        scanCompleteSession := time == time("1D")
+    else
+        scanDayHigh := math.max(scanDayHigh, high)
+        scanDayLow := math.min(scanDayLow, low)
+        scanDayClose := close
+
+    int scanBias = 0
+    if scanCompleteSession and not na(priorATRScan) and not na(priorDayClose)
+        developingTR = math.max(scanDayHigh - scanDayLow,
+             math.max(math.abs(scanDayHigh - priorDayClose), math.abs(scanDayLow - priorDayClose)))
+        scanATR = (priorATRScan * (atrLength - 1) + developingTR) / atrLength
+        upperNow = (scanDayHigh + scanDayLow) / 2 + factor * scanATR
+        lowerNow = (scanDayHigh + scanDayLow) / 2 - factor * scanATR
+        upperNow := upperNow < priorUpperScan or priorDayClose > priorUpperScan ? upperNow : priorUpperScan
+        lowerNow := lowerNow > priorLowerScan or priorDayClose < priorLowerScan ? lowerNow : priorLowerScan
+        scanDirection = priorDirectionScan < 0 ?
+             (close < lowerNow ? 1 : -1) : (close > upperNow ? -1 : 1)
+        scanBias := scanDirection < 0 ? 1 : -1
+
+    scanFibStart = priorDayClose > priorDayOpen ? priorDayHigh : priorDayLow
+    scanFibEnd = priorDayClose > priorDayOpen ? priorDayLow : priorDayHigh
+    scan62 = scanFibStart + (scanFibEnd - scanFibStart) * 0.62
+    scan79 = scanFibStart + (scanFibEnd - scanFibStart) * 0.79
+    scan705 = scanFibStart + (scanFibEnd - scanFibStart) * 0.705
+    scanZoneLow = math.min(scan62, scan79)
+    scanZoneHigh = math.max(scan62, scan79)
+    scanKillZone = not na(time(timeframe.period, "0000-0500", "America/New_York")) ? 1 :
+         not na(time(timeframe.period, "0700-1000", "America/New_York")) ? 2 :
+         not na(time(timeframe.period, "1000-1200", "America/New_York")) ? 3 : 0
+    scanPipSize = syminfo.currency == "JPY" ? 0.01 : 0.0001
+    scanCutoff = last_bar_time - historyDays * 24 * 60 * 60 * 1000
+    scanEma20 = ta.ema(close, 20)
+    scanEma50 = ta.ema(close, 50)
+    scanAtrRatio = ta.atr(14) / ta.atr(50)
+
+    if dayChanged
+        scanEntriesToday := 0
+        scanTouched := false
+        scanPendingBias := 0
+    if scanBias != lastScanBias
+        scanTouched := false
+        scanPendingBias := 0
+    if scanKillZone != lastScanKillZone
+        scanTouched := false
+        scanPendingBias := 0
+    lastScanBias := scanBias
+    lastScanKillZone := scanKillZone
+
+    if scanActiveDir != 0
+        stopHit = scanActiveDir == 1 ? low <= scanActiveSL : high >= scanActiveSL
+        tpHit = scanActiveDir == 1 ? high >= scanActiveTP : low <= scanActiveTP
+        float exitPrice = na
+        if scanActiveDir == 1 ? open <= scanActiveSL : open >= scanActiveSL
+            exitPrice := open
+        else if scanActiveDir == 1 ? open >= scanActiveTP : open <= scanActiveTP
+            exitPrice := open
+        else if stopHit or tpHit
+            exitPrice := stopHit ? scanActiveSL : scanActiveTP
+        if not na(exitPrice)
+            resultPips = (exitPrice - scanActiveEntry) * scanActiveDir / scanPipSize
+            array.push(scanClosedEntryTimes, scanActiveTime)
+            array.push(scanClosedResults, resultPips)
+            scanClosedPips += resultPips
+            scanActiveDir := 0
+
+    if scanKillZone != 0 and scanPendingBias != 0 and scanPendingBias == scanBias and scanEntriesToday < 2 and
+         scanActiveDir == 0 and bar_index > scanSignalBar
+        if low <= scanPendingEntry and high >= scanPendingEntry
+            scanEntered := true
+            scanEntriesToday += 1
+            scanDir = scanPendingBias
+            scanTP = scanDir == 1 ? scanPendingHigh : scanPendingLow
+            scanSL = scanDir == 1 ? scanPendingLow : scanPendingHigh
+            entryExit = entryBarExit(scanDir, scanPendingEntry, scanTP, scanSL)
+            if na(entryExit)
+                scanActiveDir := scanDir
+                scanActiveTime := time
+                scanActiveEntry := scanPendingEntry
+                scanActiveTP := scanTP
+                scanActiveSL := scanSL
+            else
+                resultPips = (entryExit - scanPendingEntry) * scanDir / scanPipSize
+                array.push(scanClosedEntryTimes, time)
+                array.push(scanClosedResults, resultPips)
+                scanClosedPips += resultPips
+            scanPendingBias := 0
+            scanTouched := false
+
+    if scanKillZone != 0 and scanCompleteSession and scanBias != 0 and
+         scanPendingBias == 0 and scanActiveDir == 0 and scanEntriesToday < 2 and
+         not scanEntered and priorDayHigh > priorDayLow
+        scanTouch = low <= scanZoneHigh and high >= scanZoneLow
+        scanTouched := scanTouched or scanTouch
+        scanRejected = scanBias == 1 ? close > scanZoneHigh : close < scanZoneLow
+        if scanTouched and scanRejected
+            emaAligned = scanBias * (scanEma20 - scanEma50) > 0
+            atrAllowed = not na(scanAtrRatio) and scanAtrRatio <= maxAtrRatio
+            if emaAligned and atrAllowed
+                scanPendingBias := scanBias
+                scanSignalBar := bar_index
+                scanPendingEntry := scan705
+                scanPendingHigh := priorDayHigh
+                scanPendingLow := priorDayLow
+            scanTouched := false
+
+    while array.size(scanClosedEntryTimes) > 0 and array.get(scanClosedEntryTimes, 0) < scanCutoff
+        scanClosedPips -= array.shift(scanClosedResults)
+        array.shift(scanClosedEntryTimes)
+    scanOpenPips = scanActiveDir != 0 and scanActiveTime >= scanCutoff ?
+         (close - scanActiveEntry) * scanActiveDir / scanPipSize : 0.0
+    [scanClosedPips, scanOpenPips, scanClosedPips[1], scanOpenPips[1]]
+
+var int entriesToday = 0
+var bool touched = false
+var int pendingDirection = 0
+var int signalBar = na
+var float pendingEntry = na
+var float pendingTP = na
+var float pendingSL = na
+var float pendingHigh = na
+var float pendingLow = na
+bool longSignal = false
+bool shortSignal = false
+bool entered = false
+float entryMarkerPrice = na
+
+if bar_index == chartSeedBar
+    entriesToday := 0
+    touched := false
+    pendingDirection := 0
+    for tr in active
+        line.delete(tr.path)
+        line.delete(tr.entryLine)
+        line.delete(tr.targetLine)
+        line.delete(tr.stopLine)
+    array.clear(active)
+    for id in finishedLines
+        line.delete(id)
+    array.clear(finishedLines)
+
+if isM15 and barstate.isconfirmed
+    if newDay
+        entriesToday := 0
+        touched := false
+        pendingDirection := 0
+    if bias != bias[1]
+        touched := false
+        pendingDirection := 0
+    if killZone != nz(killZone[1], 0)
+        touched := false
+        pendingDirection := 0
+
+    // Existing trades retain their original endpoints across day/bias changes.
+    if array.size(active) > 0
+        for i = array.size(active) - 1 to 0
+            tr = array.get(active, i)
+            stopHit = tr.direction == 1 ? low <= tr.stop : high >= tr.stop
+            tpHit = tr.direction == 1 ? high >= tr.target : low <= tr.target
+            float exitPrice = na
+            // Gap exits occur at the opening price.
+            if tr.direction == 1 ? open <= tr.stop : open >= tr.stop
+                exitPrice := open
+            else if tr.direction == 1 ? open >= tr.target : open <= tr.target
+                exitPrice := open
+            else if stopHit or tpHit
+                exitPrice := stopHit ? tr.stop : tr.target
+            line.set_xy2(tr.path, time, na(exitPrice) ? close : exitPrice)
+            line.set_x2(tr.entryLine, time_close)
+            line.set_x2(tr.targetLine, time_close)
+            line.set_x2(tr.stopLine, time_close)
+            if not na(exitPrice)
+                line.set_color(tr.path, (exitPrice - tr.entry) * tr.direction > 0 ? color.lime : color.red)
+                array.push(finishedLines, tr.path)
+                array.push(finishedLines, tr.entryLine)
+                array.push(finishedLines, tr.targetLine)
+                array.push(finishedLines, tr.stopLine)
+                array.remove(active, i)
+
+    // A midpoint touch must occur on a strictly later M15 candle.
+    // Only one trade may be open for this pair at a time.
+    if killZone != 0 and pendingDirection != 0 and pendingDirection == bias and entriesToday < 2 and array.size(active) == 0 and bar_index > signalBar
+        if low <= pendingEntry and high >= pendingEntry
+            entered := true
+            entryMarkerPrice := pendingEntry
+            entriesToday += 1
+            dir = pendingDirection
+            pendingTP := dir == 1 ? pendingHigh : pendingLow
+            pendingSL := dir == 1 ? pendingLow : pendingHigh
+            path = line.new(time, pendingEntry, time, close, xloc = xloc.bar_time,
+                 color = color.yellow, width = 2, force_overlay = true)
+            levelAlpha = showTradeLevels ? 20 : 100
+            el = line.new(time, pendingEntry, time_close, pendingEntry, xloc = xloc.bar_time,
+                 color = color.new(color.gray, levelAlpha), style = line.style_dotted,
+                 force_overlay = true)
+            tl = line.new(time, pendingTP, time_close, pendingTP, xloc = xloc.bar_time,
+                 color = color.new(color.lime, levelAlpha), style = line.style_dashed,
+                 force_overlay = true)
+            sl = line.new(time, pendingSL, time_close, pendingSL, xloc = xloc.bar_time,
+                 color = color.new(color.red, levelAlpha), style = line.style_dashed,
+                 force_overlay = true)
+            tr = Trade.new(dir, pendingEntry, pendingTP, pendingSL, path, el, tl, sl)
+            exitPrice = entryBarExit(dir, pendingEntry, pendingTP, pendingSL)
+            if na(exitPrice)
+                array.push(active, tr)
+            else
+                line.set_xy2(path, time, exitPrice)
+                line.set_color(path, (exitPrice - pendingEntry) * dir > 0 ? color.lime : color.red)
+                array.push(finishedLines, path)
+                array.push(finishedLines, el)
+                array.push(finishedLines, tl)
+                array.push(finishedLines, sl)
+            pendingDirection := 0
+            touched := false
+
+    // While a trade is open, ignore new setups. Its exit permits a fresh signal.
+    if killZone != 0 and ready and bias != 0 and pendingDirection == 0 and array.size(active) == 0 and entriesToday < 2 and not entered and fibHigh > fibLow
+        zoneTouch = low <= zoneHigh and high >= zoneLow
+        touched := touched or zoneTouch
+        rejected = bias == 1 ? close > zoneHigh : close < zoneLow
+        if touched and rejected
+            emaAligned = bias * (armEma20 - armEma50) > 0
+            atrAllowed = not na(armAtrRatio) and armAtrRatio <= maxAtrRatio
+            if emaAligned and atrAllowed
+                longSignal := bias == 1
+                shortSignal := bias == -1
+                pendingDirection := bias
+                signalBar := bar_index
+                pendingEntry := p705
+                pendingHigh := fibHigh
+                pendingLow := fibLow
+            touched := false
+
+    while array.size(finishedLines) > keepTrades * 4
+        line.delete(array.shift(finishedLines))
+
+// Keep the visible trade drawings in the selected rolling window. The replay
+// still processes earlier bars so one-open-trade state remains continuous.
+if barstate.islast and array.size(finishedLines) > 0
+    for i = array.size(finishedLines) - 1 to 0
+        id = array.get(finishedLines, i)
+        if line.get_x2(id) < historyStart
+            line.delete(id)
+            array.remove(finishedLines, i)
+
+// Mark the actual confirmed signal candles, rather than adding fib labels.
+barcolor(inHistory ? (longSignal ? color.aqua : shortSignal ? color.fuchsia : na) : na)
+plotshape(inHistory and longSignal, title = "Long signal", style = shape.triangleup,
+     location = location.belowbar, color = color.aqua, size = size.tiny,
+     force_overlay = true)
+plotshape(inHistory and shortSignal, title = "Short signal", style = shape.triangledown,
+     location = location.abovebar, color = color.fuchsia, size = size.tiny,
+     force_overlay = true)
+plotshape(inHistory ? entryMarkerPrice : na, title = "Midpoint entry", style = shape.circle,
+     location = location.absolute, color = color.yellow, size = size.tiny,
+     force_overlay = true)
+
+var pairNames = array.from(
+     "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD",
+     "EURGBP", "EURJPY", "EURCHF", "EURCAD", "EURAUD", "EURNZD",
+     "GBPJPY", "GBPCHF", "GBPCAD", "GBPAUD", "GBPNZD",
+     "AUDJPY", "AUDCHF", "AUDCAD", "AUDNZD",
+     "NZDJPY", "NZDCHF", "NZDCAD", "CADJPY", "CADCHF", "CHFJPY")
+var pairClosed = array.new_float(28, na)
+var pairOpen = array.new_float(28, na)
+if isM15 and showPairTable
+    for i = 0 to 27
+        ticker = "OANDA:" + array.get(pairNames, i)
+        [liveClosed, liveOpen, priorClosed, priorOpen] = request.security(ticker, "15", scanPair(),
+             gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off,
+             ignore_invalid_symbol = true, calc_bars_count = 3500)
+        // The chart's open M15 bar is provisional; display completed values.
+        array.set(pairClosed, i, barstate.isconfirmed ? liveClosed : priorClosed)
+        array.set(pairOpen, i, barstate.isconfirmed ? liveOpen : priorOpen)
+
+pipText(float amount) =>
+    na(amount) ? "—" : (amount > 0 ? "+" : "") + str.tostring(amount, "#.0")
+
+// Two blocks of fourteen pairs keep the table readable in its own pane.
+var pairTable = table.new(position.top_right, 8, 16,
+     bgcolor = color.new(color.rgb(10, 23, 40), 5),
+     frame_color = color.rgb(80, 105, 133), frame_width = 1)
+if barstate.islast and isM15 and showPairTable
+    headerColor = color.rgb(24, 54, 80)
+    for side = 0 to 1
+        col = side * 4
+        table.cell(pairTable, col, 0, side == 0 ? "28 pairs · " + str.tostring(historyDays) + "d" : "Pair",
+             text_color = color.white, bgcolor = headerColor, text_size = tableFontSize)
+        table.cell(pairTable, col + 1, 0, "Closed", text_color = color.white, bgcolor = headerColor, text_size = tableFontSize)
+        table.cell(pairTable, col + 2, 0, "Open", text_color = color.white, bgcolor = headerColor, text_size = tableFontSize)
+        table.cell(pairTable, col + 3, 0, "Net", text_color = color.white, bgcolor = headerColor, text_size = tableFontSize)
+    float totalClosed = 0.0
+    float totalOpen = 0.0
+    for i = 0 to 27
+        c = array.get(pairClosed, i)
+        o = array.get(pairOpen, i)
+        n = c + o
+        col = i < 14 ? 0 : 4
+        row = i % 14 + 1
+        rowColor = row % 2 == 0 ? color.new(color.rgb(13, 31, 51), 5) : color.new(color.rgb(18, 39, 63), 5)
+        valueColor = na(n) ? color.gray : n > 0 ? color.aqua : n < 0 ? color.rgb(255, 112, 112) : color.white
+        table.cell(pairTable, col, row, array.get(pairNames, i), text_color = color.white, bgcolor = rowColor, text_size = tableFontSize)
+        table.cell(pairTable, col + 1, row, pipText(c), text_color = color.white, bgcolor = rowColor, text_size = tableFontSize)
+        table.cell(pairTable, col + 2, row, pipText(o), text_color = color.white, bgcolor = rowColor, text_size = tableFontSize)
+        table.cell(pairTable, col + 3, row, pipText(n), text_color = valueColor, bgcolor = rowColor, text_size = tableFontSize)
+        if not na(c)
+            totalClosed += c
+        if not na(o)
+            totalOpen += o
+    table.cell(pairTable, 0, 15, "TOTAL", text_color = color.white, bgcolor = headerColor, text_size = tableFontSize)
+    table.cell(pairTable, 1, 15, pipText(totalClosed), text_color = color.white, bgcolor = headerColor, text_size = tableFontSize)
+    table.cell(pairTable, 2, 15, pipText(totalOpen), text_color = color.white, bgcolor = headerColor, text_size = tableFontSize)
+    table.cell(pairTable, 3, 15, pipText(totalClosed + totalOpen),
+         text_color = totalClosed + totalOpen >= 0 ? color.aqua : color.rgb(255, 112, 112),
+         bgcolor = headerColor, text_size = tableFontSize)
+    for col = 4 to 7
+        table.cell(pairTable, col, 15, "", bgcolor = headerColor, text_size = tableFontSize)
+
+var notice = table.new(position.bottom_right, 1, 1)
+if barstate.islast
+    table.cell(notice, 0, 0, isM15 ? "EMA20/50 + ATR14/50 ≤ " + str.tostring(maxAtrRatio, "#.00") : "Use M15 for trade signals",
+         text_color = color.white, bgcolor = color.new(color.black, 30))

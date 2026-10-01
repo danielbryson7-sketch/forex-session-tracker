@@ -1,0 +1,13 @@
+# Local credentials, runtime state, market data, and generated results
+credentials*.local.ps1
+mail-credentials.local.ps1
+.massive-api-key.local
+.env
+.env.*
+data/
+research/
+outputs/
+*.log
+*.tmp
+__pycache__/
+.DS_Store

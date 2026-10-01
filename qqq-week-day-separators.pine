@@ -1,0 +1,72 @@
+//@version=6
+indicator("QQQ New York Week + Day Separators", overlay = true,
+     max_lines_count = 500, max_labels_count = 500)
+
+// Intended for QQQ on an intraday chart, especially M15. The exchange's
+// regular session starts at 09:30 New York time in both EST and EDT.
+const string TZ = "America/New_York"
+const string RTH = "0930-1600:23456"
+
+string lineGroup = "Separator lines"
+bool showDays = input.bool(true, "Show day separators", group = lineGroup)
+color dayColor = input.color(color.new(color.white, 45), "Day color", group = lineGroup)
+int dayWidth = input.int(1, "Day thickness", minval = 1, maxval = 4, group = lineGroup)
+bool showWeeks = input.bool(true, "Highlight first trading day of week", group = lineGroup)
+color weekColor = input.color(color.new(color.purple, 0), "Week color", group = lineGroup)
+int weekWidth = input.int(3, "Week thickness", minval = 1, maxval = 5, group = lineGroup)
+int daysToKeep = input.int(220, "Trading days to keep", minval = 10, maxval = 450, group = lineGroup)
+
+string labelGroup = "Day labels"
+bool showLabels = input.bool(true, "Show day labels", group = labelGroup)
+bool centerLabels = input.bool(true, "Place labels near noon", group = labelGroup)
+color labelColor = input.color(color.new(color.white, 0), "Label color", group = labelGroup)
+
+bool inRegularSession = timeframe.isintraday and not na(time(timeframe.period, RTH, TZ))
+int nyDay = year(time, TZ) * 10000 + month(time, TZ) * 100 + dayofmonth(time, TZ)
+// Weekly bar timestamps handle the year-end boundary without a manual
+// year/week-number calculation. We compare them only on regular-session bars.
+int tradingWeek = time("W")
+
+var int lastTradingDay = na
+var int lastTradingWeek = na
+var bool labelPending = false
+var string pendingLabel = ""
+var array<line> separators = array.new<line>()
+var array<label> dayLabels = array.new<label>()
+
+bool firstBarOfDay = inRegularSession and (na(lastTradingDay) or nyDay != lastTradingDay)
+if firstBarOfDay
+    bool firstTradingDayOfWeek = na(lastTradingWeek) or tradingWeek != lastTradingWeek
+    lastTradingDay := nyDay
+    lastTradingWeek := tradingWeek
+
+    bool drawWeek = firstTradingDayOfWeek and showWeeks
+    if drawWeek or showDays
+        line separator = line.new(time, low, time, high,
+             xloc = xloc.bar_time, extend = extend.both,
+             color = drawWeek ? weekColor : dayColor,
+             width = drawWeek ? weekWidth : dayWidth)
+        array.push(separators, separator)
+        if array.size(separators) > daysToKeep
+            line.delete(array.shift(separators))
+
+    string dayName = switch dayofweek(time, TZ)
+        dayofweek.monday => "MON"
+        dayofweek.tuesday => "TUE"
+        dayofweek.wednesday => "WED"
+        dayofweek.thursday => "THU"
+        dayofweek.friday => "FRI"
+        => "DAY"
+    pendingLabel := firstTradingDayOfWeek and showWeeks ? "WEEK · " + dayName : dayName
+    labelPending := showLabels
+
+// A noon label is placed on the first available regular-session bar at or
+// after 12:00 NY, so it does not require an exact 12:00 candle.
+if labelPending and inRegularSession and (not centerLabels or hour(time, TZ) >= 12)
+    label dayLabel = label.new(time, low, pendingLabel,
+         xloc = xloc.bar_time, yloc = yloc.belowbar,
+         style = label.style_none, textcolor = labelColor, size = size.small)
+    array.push(dayLabels, dayLabel)
+    if array.size(dayLabels) > daysToKeep
+        label.delete(array.shift(dayLabels))
+    labelPending := false

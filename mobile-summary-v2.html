@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#08111d">
+  <title>V2 paper trades</title>
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#08111d;color:#edf5ff}
+    *{box-sizing:border-box}
+    body{margin:0;min-width:280px;background:#08111d}
+    main{max-width:660px;margin:auto;padding:20px 14px calc(32px + env(safe-area-inset-bottom))}
+    header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:17px}
+    h1{font-size:24px;letter-spacing:-.04em;line-height:1.1;margin:0}
+    .subtitle,.updated{color:#9eb5cc;font-size:12px}
+    .subtitle{margin-top:6px}
+    .updated{text-align:right;white-space:nowrap}
+    .overview{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px}
+    .overview>div,.trade{border:1px solid #294056;background:#102035;border-radius:14px}
+    .overview>div{padding:13px 15px}
+    .label{display:block;color:#a9bed1;font-size:12px;font-weight:600}
+    .overview strong{display:block;margin-top:4px;font-size:23px;line-height:1.2;font-variant-numeric:tabular-nums}
+    .trade{padding:17px;margin-bottom:11px;transition:background-color .35s;border-width:2px}
+    .trade.long{border-color:#5798ff}.trade.short{border-color:#e6606c}
+    .trade-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:15px}
+    .pair{font-size:21px;font-weight:750;letter-spacing:-.03em}
+    .side{font-size:12px;font-weight:750;letter-spacing:.08em;padding:6px 9px;border-radius:7px;background:#254274;color:#cfe3ff}
+    .side.short{background:#572c37;color:#ffd6db}
+    .trade-values{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .value{min-width:0;background:#0b192a;border-radius:9px;padding:11px 12px}
+    .value strong{display:block;margin-top:5px;font-size:22px;line-height:1.2;font-variant-numeric:tabular-nums;white-space:nowrap}
+    .value.net{grid-column:1/-1}.value.compact strong{font-size:17px}.value.tp strong{color:#b9d8ff}.value.sl strong{color:#ffbab5}
+    .trade-actions{display:flex;justify-content:flex-end;margin-top:13px}.exit-button{border:1px solid #ffbec0;border-radius:8px;background:#422938;color:#fff;padding:9px 13px;font-size:12px;font-weight:700;min-height:38px}
+    .exit-button:hover{background:#623544}.exit-button:focus-visible{outline:2px solid white;outline-offset:2px}
+    .ote-card{display:flex;justify-content:space-between;align-items:center;gap:10px;background:#102035;border:1px solid #42566a;border-radius:11px;padding:12px 14px;margin-bottom:8px}
+    .ote-card.inside{border-color:#e1bc56;background:#302c20}.ote-card.pending-entry{border:2px solid #f2cb4f;box-shadow:0 0 0 1px #f2cb4f66}.ote-card .pair{font-size:16px}.ote-distance{text-align:right;font-size:12px;font-weight:700;color:#e7c56a;white-space:nowrap}.ote-position{display:block;color:#aebfd0;font-size:11px;font-weight:500;margin-top:3px}
+    dialog{width:min(410px,calc(100vw - 24px));background:#112238;color:#edf5ff;border:1px solid #526a82;border-radius:14px;padding:20px;box-shadow:0 20px 60px #000a}dialog::backdrop{background:#000b}dialog h2{font-size:19px;margin:0 0 10px}dialog p{font-size:13px;line-height:1.45;color:#bacde0}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}.dialog-actions button{min-height:40px;border:1px solid #60758d;border-radius:8px;background:#20384e;color:white;padding:9px 12px;font-weight:700}.dialog-actions .confirm{background:#823d4a;border-color:#c4717b}.dialog-actions button:disabled{opacity:.55}.dialog-error{min-height:18px;color:#ff9d91!important}
+    .positive{color:#55d6b3!important}.negative{color:#ff8d87!important}
+    .empty,.error{padding:22px 16px;border:1px solid #294056;border-radius:14px;background:#102035;color:#a9bed1;text-align:center}
+    .error{color:#ff9d91}
+    .section-title{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:22px 2px 11px}
+    .section-title h2{font-size:17px;margin:0;letter-spacing:-.02em}
+    .section-title span{color:#9eb5cc;font-size:12px;font-variant-numeric:tabular-nums}
+    .closed-trade{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 10px;padding:12px 14px;margin-bottom:8px;border:1px solid #294056;border-radius:11px;background:#102035}
+    .closed-main{display:flex;align-items:center;gap:8px;min-width:0}
+    .closed-main .pair{font-size:16px;white-space:nowrap}
+    .closed-main .side{font-size:10px;padding:4px 6px}
+    .closed-pips{font-size:17px;font-weight:750;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+    .closed-detail{grid-column:1/-1;color:#9eb5cc;font-size:11px}
+    .note{color:#829bb2;font-size:11px;line-height:1.45;margin:16px 2px 0}
+    .trade,.ote-card,.closed-trade{cursor:pointer}
+    .trade:focus-visible,.ote-card:focus-visible,.closed-trade:focus-visible{outline:2px solid #e1bc56;outline-offset:2px}
+    .chart-dialog{width:min(700px,calc(100vw - 16px));max-width:none;padding:15px 12px 18px}
+    .chart-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin:0 4px 10px}
+    .chart-header h2{margin:0 0 4px;font-size:19px}.chart-header p{margin:0;color:#9eb5cc;font-size:12px}
+    .chart-close{border:1px solid #526a82;border-radius:8px;background:#20384e;color:#fff;min-width:40px;min-height:40px;font-size:23px}
+    .chart-wrap{background:#0c1728;border:1px solid #294056;border-radius:11px;overflow:hidden}
+    #pair-chart{display:block;width:100%;height:auto;min-height:280px}
+    .chart-status{margin:8px 5px 0;color:#aac0d2;font-size:12px;line-height:1.4}
+    @media(max-width:350px){main{padding-left:10px;padding-right:10px}.pair{font-size:19px}.value strong{font-size:19px}}
+  </style>
+</head>
+<body>
+<main>
+  <header><div><h1>V2 paper trades</h1><div class="subtitle">Tap a pair for its last four hours of M15 candles</div></div><div id="updated" class="updated">Loading…</div></header>
+  <div class="overview"><div><span class="label">Open trades</span><strong id="count">—</strong></div><div><span class="label">Open net pips</span><strong id="total">—</strong></div></div>
+  <div class="section-title"><h2>Open trades</h2></div>
+  <div id="trades"></div>
+  <div class="section-title"><h2>Pairs with OTE zones</h2><span id="ote-summary">—</span></div>
+  <div id="ote-pairs"></div>
+  <div class="section-title"><h2>Closed trades</h2><span id="closed-summary">—</span></div>
+  <div id="closed-trades"></div>
+  <p class="note">Open trade and OTE distances use the latest available midpoint price. Replay rows are historical v2 simulations, not OANDA orders. New V2 trades can be linked to OANDA practice positions. Data refreshes every 30 seconds. Anyone on this home network with this page can close a linked practice trade.</p>
+</main>
+<dialog id="exit-dialog" aria-labelledby="exit-title"><h2 id="exit-title">Exit trade?</h2><p id="exit-detail"></p><p id="exit-practice-notice"></p><p id="exit-error" class="dialog-error" role="alert"></p><div class="dialog-actions"><button id="keep-trade" type="button">Keep open</button><button id="confirm-exit" class="confirm" type="button">Exit trade</button></div></dialog>
+<dialog id="chart-dialog" class="chart-dialog" aria-labelledby="chart-title"><div class="chart-header"><div><h2 id="chart-title">M15 price action</h2><p id="chart-meta">Loading candles…</p></div><button id="chart-close" class="chart-close" type="button" aria-label="Close chart">×</button></div><div class="chart-wrap"><svg id="pair-chart" role="img" aria-label="Four hours of M15 candlesticks"></svg></div><p id="chart-status" class="chart-status"></p></dialog>
+<script>
+  const $=id=>document.getElementById(id);
+  const timeFormat=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',hour12:true});
+  const dateFormat=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true});
+  const signed=value=>`${value>=0?'+':''}${value.toFixed(1)}`;
+  const validNumber=value=>value!==null&&value!==undefined&&value!==''&&Number.isFinite(Number(value));
+  function node(tag,className,text){const el=document.createElement(tag);if(className)el.className=className;if(text!==undefined)el.textContent=text;return el}
+  const mix=(start,end,amount)=>`rgb(${start.map((v,i)=>Math.round(v+(end[i]-v)*amount)).join(',')})`;
+  const clamp=value=>Math.max(0,Math.min(1,value));
+  const svgNS='http://www.w3.org/2000/svg';
+  const chartClock=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',hour12:false});
+  let chartPair=null;
+  function svgNode(parent,tag,attrs={},text){const item=document.createElementNS(svgNS,tag);for(const [key,value] of Object.entries(attrs))item.setAttribute(key,String(value));if(text!==undefined)item.textContent=text;parent.appendChild(item);return item}
+  function chartPrice(pair,value){return Number(value).toFixed(pair.endsWith('/JPY')?3:5)}
+  function makePairClickable(element,pair){element.tabIndex=0;element.setAttribute('role','button');element.setAttribute('aria-label',`Show ${pair} M15 price action`);element.addEventListener('click',()=>showChart(pair));element.addEventListener('keydown',event=>{if(event.target===element&&(event.key==='Enter'||event.key===' ')){event.preventDefault();showChart(pair)}})}
+  function renderChart(data){
+    const svg=$('pair-chart'),bars=(data.bars||[]).filter(bar=>Array.isArray(bar)&&bar.length===5);
+    svg.replaceChildren();svg.setAttribute('viewBox','0 0 680 390');
+    if(!bars.length){$('chart-status').textContent='No completed M15 candles are available.';return}
+    const pad={left:44,right:78,top:30,bottom:48},width=680-pad.left-pad.right,height=390-pad.top-pad.bottom;
+    const low=Math.min(...bars.map(bar=>Number(bar[3]))),high=Math.max(...bars.map(bar=>Number(bar[2]))),margin=Math.max((high-low)*.12,data.pair.endsWith('/JPY')?.005:.00005);
+    const yMin=low-margin,yMax=high+margin,unit=width/bars.length;
+    const x=index=>pad.left+(index+.5)*unit,y=value=>pad.top+(yMax-Number(value))/(yMax-yMin)*height;
+    const bias=Number(data.engine?.bias||0),biasName=bias===1?'bullish':bias===-1?'bearish':'unready',biasColor=bias===1?'#5798ff':bias===-1?'#e6606c':'#8796a4';
+    svgNode(svg,'rect',{x:pad.left,y:pad.top,width,height,fill:biasColor,'fill-opacity':.12});
+    const sessionColors={Asia:'#376699',London:'#8a6bb4','New York':'#bd8651','Market open':'#1e6274'};
+    function session(time){const parts=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'2-digit',hourCycle:'h23'}).formatToParts(new Date(time));const hour=Number(parts.find(p=>p.type==='hour')?.value||0);return hour>=20||hour<2?'Asia':hour<8?'London':hour<17?'New York':'Market open'}
+    let groupStart=0;
+    for(let index=1;index<=bars.length;index++)if(index===bars.length||session(bars[index][0])!==session(bars[groupStart][0])){const name=session(bars[groupStart][0]),left=pad.left+groupStart*unit;svgNode(svg,'rect',{x:left,y:pad.top,width:(index-groupStart)*unit,height,fill:sessionColors[name],'fill-opacity':.08});if((index-groupStart)*unit>40)svgNode(svg,'text',{x:left+5,y:pad.top+13,fill:'#aebfd0','font-size':10},name);groupStart=index}
+    for(let tick=0;tick<=4;tick++){const value=yMin+(yMax-yMin)*tick,yy=y(value);svgNode(svg,'line',{x1:pad.left,y1:yy,x2:pad.left+width,y2:yy,stroke:'#365069','stroke-width':1,'stroke-opacity':.5});svgNode(svg,'text',{x:pad.left+width+6,y:yy+4,fill:'#9eb5cc','font-size':10},chartPrice(data.pair,value))}
+    const ote=data.engine?.ote;
+    if(ote&&validNumber(ote.low)&&validNumber(ote.high)){
+      const top=y(ote.high),bottom=y(ote.low),visibleTop=Math.max(pad.top,top),visibleBottom=Math.min(pad.top+height,bottom);
+      if(visibleBottom>visibleTop){svgNode(svg,'rect',{x:pad.left,y:visibleTop,width,height:visibleBottom-visibleTop,fill:bias===1?'#5798ff':'#e6606c','fill-opacity':.18});for(const level of [ote.low,ote.p705,ote.high])if(Number(level)>=yMin&&Number(level)<=yMax)svgNode(svg,'line',{x1:pad.left,y1:y(level),x2:pad.left+width,y2:y(level),stroke:'#e8aa46','stroke-width':Number(level)===Number(ote.p705)?2:1,'stroke-dasharray':Number(level)===Number(ote.p705)?'5 4':''})}
+    }
+    const position=data.engine?.position;
+    if(position)for(const [key,color] of [['entry','#e8d26a'],['tp1','#6bdd9f'],['stop','#ff8080']]){const value=Number(position[key]);if(value>=yMin&&value<=yMax){svgNode(svg,'line',{x1:pad.left,y1:y(value),x2:pad.left+width,y2:y(value),stroke:color,'stroke-width':1.5,'stroke-dasharray':'7 4'});svgNode(svg,'text',{x:pad.left+4,y:y(value)-3,fill:color,'font-size':10},key.toUpperCase())}}
+    bars.forEach((bar,index)=>{const [time,open,hi,lo,close]=bar.map((value,i)=>i===0?value:Number(value)),xx=x(index),up=close>=open,color=up?'#4bd0b0':'#f17e78';svgNode(svg,'line',{x1:xx,y1:y(hi),x2:xx,y2:y(lo),stroke:color,'stroke-width':1.4});svgNode(svg,'rect',{x:xx-Math.min(11,unit*.34),y:Math.min(y(open),y(close)),width:Math.min(22,unit*.68),height:Math.max(2,Math.abs(y(open)-y(close))),fill:color});if(index%4===0||index===bars.length-1)svgNode(svg,'text',{x:xx,y:390-18,fill:'#aabfd1','font-size':10,'text-anchor':'middle'},chartClock.format(new Date(time))) });
+    svgNode(svg,'line',{x1:pad.left,y1:y(bars.at(-1)[4]),x2:pad.left+width,y2:y(bars.at(-1)[4]),stroke:'#aabfd1','stroke-dasharray':'2 4','stroke-opacity':.7});
+    $('chart-meta').textContent=`${bars.length} completed M15 candles · ${chartClock.format(new Date(bars[0][0]))}–${chartClock.format(new Date(bars.at(-1)[0]))} New York`;
+    $('chart-status').textContent=`Daily Supertrend ${biasName}. ${ote?`OTE ${chartPrice(data.pair,ote.low)}–${chartPrice(data.pair,ote.high)} · 70.5% ${chartPrice(data.pair,ote.p705)}.`:'OTE unavailable.'} OANDA midpoint candles; lines outside this four-hour price range are hidden.`;
+  }
+  async function refreshChart(){if(!chartPair||!$('chart-dialog').open)return;const pair=chartPair;try{const response=await fetch('/api/chart?pair='+encodeURIComponent(pair),{cache:'no-store'});const data=await response.json();if(!response.ok)throw Error(data.error||'Could not load candles');if(chartPair===pair)renderChart(data)}catch(error){if(chartPair===pair)$('chart-status').textContent=error.message||'Could not load candles'}}
+  function showChart(pair){chartPair=pair;$('chart-title').textContent=`${pair} · last four hours`;$('chart-meta').textContent='Loading completed M15 candles…';$('chart-status').textContent='';$('pair-chart').replaceChildren();if(!$('chart-dialog').open)$('chart-dialog').showModal();refreshChart()}
+  $('chart-close').addEventListener('click',()=>$('chart-dialog').close());$('chart-dialog').addEventListener('close',()=>{chartPair=null});
+  let exitRequest=null;
+  function askExit(trade){exitRequest={pair:trade.pair,entryTime:trade.entryTime};$('exit-title').textContent=`Exit ${trade.pair} ${trade.direction} trade?`;$('exit-detail').textContent=`Currently ${signed(Number(trade.markPips)||0)} pips. The final quote may differ.`;$('exit-practice-notice').textContent=trade.practice?.tradeId?'This closes the linked OANDA practice trade first, then the paper trade.':'No confirmed OANDA practice position is linked; this closes the paper trade only.';$('exit-error').textContent='';$('exit-dialog').showModal()}
+  async function confirmExit(){if(!exitRequest)return;const button=$('confirm-exit');button.disabled=true;$('keep-trade').disabled=true;$('exit-error').textContent='Fetching a fresh quote…';try{const response=await fetch('/api/paper/close',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(exitRequest)});const result=await response.json();if(!response.ok)throw Error(result.error||'Could not exit paper trade');exitRequest=null;$('exit-dialog').close();await refresh()}catch(error){$('exit-error').textContent=error.message||'Could not exit paper trade'}finally{button.disabled=false;$('keep-trade').disabled=false}}
+  $('keep-trade').addEventListener('click',()=>$('exit-dialog').close());$('confirm-exit').addEventListener('click',confirmExit);
+  function render(data){
+    const trades=Array.isArray(data.open)?data.open:[];
+    const total=trades.reduce((sum,trade)=>sum+(validNumber(trade.markPips)?Number(trade.markPips):0),0);
+    $('count').textContent=String(trades.length);
+    $('total').textContent=signed(total);
+    $('total').className=total>0?'positive':total<0?'negative':'';
+    $('updated').textContent=data.updatedAt?`Checked ${timeFormat.format(new Date(data.updatedAt))} NY`:'Update unavailable';
+    const list=$('trades');list.replaceChildren();
+    if(!trades.length)list.appendChild(node('div','empty','No open paper trades right now.'));
+    for(const trade of trades.slice().sort((a,b)=>String(a.pair).localeCompare(String(b.pair)))){
+      const direction=String(trade.direction||'').toLowerCase();
+      const card=node('article',`trade ${direction}`);makePairClickable(card,trade.pair);
+      const pipSize=String(trade.pair||'').endsWith('/JPY')?0.01:0.0001;
+      const mark=validNumber(trade.mark)?Number(trade.mark):null;
+      const entry=validNumber(trade.entry)?Number(trade.entry):null;
+      const tp=validNumber(trade.tp1)?Number(trade.tp1):null;
+      const sl=validNumber(trade.stop)?Number(trade.stop):null;
+      const sign=direction==='long'?1:-1;
+      const tpDistance=mark!==null&&tp!==null?Math.max(0,sign*(tp-mark)/pipSize):null;
+      const slDistance=mark!==null&&sl!==null?Math.max(0,sign*(mark-sl)/pipSize):null;
+      if(mark!==null&&entry!==null&&tp!==null&&sl!==null){
+        const towardTarget=sign*(mark-entry)>=0;
+        const full=towardTarget?Math.abs(tp-entry):Math.abs(entry-sl);
+        const amount=full>0?clamp(Math.abs(mark-entry)/full):0;
+        card.style.backgroundColor=mix([59,49,24],towardTarget?[19,61,116]:[112,34,46],amount);
+      }
+      const head=node('div','trade-head');head.append(node('div','pair',trade.pair||'—'));
+      head.append(node('span',`side ${direction==='short'?'short':''}`,direction?direction.toUpperCase():'—'));
+      card.appendChild(head);
+      const values=node('div','trade-values');
+      const net=node('div','value net');net.append(node('span','label','Open net pips'));
+      const netPips=validNumber(trade.markPips)?Number(trade.markPips):null;
+      net.append(node('strong',netPips===null?'':netPips>0?'positive':netPips<0?'negative':'',netPips===null?'—':signed(netPips)));
+      values.appendChild(net);
+      const target=node('div','value compact tp');target.append(node('span','label','To TP'));target.append(node('strong','',tpDistance===null?'—':`${tpDistance.toFixed(1)} pips`));values.appendChild(target);
+      const stop=node('div','value compact sl');stop.append(node('span','label','To SL'));stop.append(node('strong','',slDistance===null?'—':`${slDistance.toFixed(1)} pips`));values.appendChild(stop);
+      card.appendChild(values);
+      if(trade.practice)card.appendChild(node('div','value',`OANDA practice: ${trade.practice.status}${trade.practice.units?` · ${Number(trade.practice.units).toLocaleString()} units · ~$${Number(trade.practice.dollarsPerPip).toFixed(2)}/pip`:''}`));
+      const actions=node('div','trade-actions');const exit=node('button','exit-button','Exit trade');exit.type='button';exit.addEventListener('click',event=>{event.stopPropagation();askExit(trade)});actions.appendChild(exit);card.appendChild(actions);
+      list.appendChild(card);
+    }
+    const oteList=$('ote-pairs');oteList.replaceChildren();
+    const otePairs=Object.entries(data.pairTotals||{}).filter(([,item])=>item?.hasOte&&!item?.hasOpen).sort((a,b)=>Number(Boolean(b[1].inOte))-Number(Boolean(a[1].inOte))||Number(a[1].oteDistancePips??Infinity)-Number(b[1].oteDistancePips??Infinity)||a[0].localeCompare(b[0]));
+    $('ote-summary').textContent=`${otePairs.length} pairs`;
+    if(!otePairs.length)oteList.appendChild(node('div','empty','No current OTE zones.'));
+    for(const [pair,item] of otePairs){const card=node('article',`ote-card${item.inOte?' inside':''}${item.hasPending?' pending-entry':''}`);makePairClickable(card,pair);card.appendChild(node('strong','pair',pair));const detail=node('div','ote-distance');detail.appendChild(node('span','',item.oteDistancePips===null||item.oteDistancePips===undefined?'Distance unavailable':`${Number(item.oteDistancePips).toFixed(1)} pips`));detail.appendChild(node('span','ote-position',item.hasPending?'Signal waiting for entry':item.inOte?'Inside OTE':item.otePosition?`Price ${item.otePosition} zone`:'OTE zone available'));card.appendChild(detail);oteList.appendChild(card)}
+    const closed=Array.isArray(data.recent)?data.recent:[];
+    const closedTotal=validNumber(data.netPips)?Number(data.netPips):0;
+    $('closed-summary').textContent=`${data.closedCount??closed.length} trades · ${signed(closedTotal)} pips`;
+    const history=$('closed-trades');history.replaceChildren();
+    if(!closed.length)history.appendChild(node('div','empty','No closed paper trades yet.'));
+    for(const trade of closed){
+      const row=node('article','closed-trade');makePairClickable(row,trade.pair);
+      const main=node('div','closed-main');main.append(node('span','pair',trade.pair||'—'));
+      const side=String(trade.direction||'').toLowerCase();main.append(node('span',`side ${side==='short'?'short':''}`,side?side.toUpperCase():'—'));
+      row.appendChild(main);
+      const netPips=validNumber(trade.netPips)?Number(trade.netPips):null;
+      row.append(node('strong',`closed-pips ${netPips===null?'':netPips>0?'positive':netPips<0?'negative':''}`,netPips===null?'—':`${signed(netPips)} pips`));
+      const reason=trade.exitReason==='tp1'?'TP1':trade.exitReason==='stop'?'Stop':trade.exitReason==='friday'?'Friday close':trade.exitReason==='bias_lost'?'H4 bias lost':trade.exitReason==='manual'?'Manual exit':trade.exitReason||'Closed';
+      const closedAt=trade.exitTime?dateFormat.format(new Date(trade.exitTime))+' NY':'Time unavailable';
+      row.append(node('div','closed-detail',`${trade.origin==='historical-replay'?'V2 replay · ':''}${reason} · ${closedAt}`));history.appendChild(row);
+    }
+  }
+  async function refresh(){
+    try{const response=await fetch('/api/paper/all',{cache:'no-store'});const data=await response.json();if(!response.ok)throw new Error(data.error||'Trade data unavailable');render(data)}
+    catch(error){$('updated').textContent='Update failed';$('trades').replaceChildren(node('div','error',error.message||'Trade data unavailable'));$('ote-pairs').replaceChildren();$('closed-trades').replaceChildren()}
+  }
+  refresh();setInterval(refresh,30000);setInterval(refreshChart,30000);document.addEventListener('visibilitychange',()=>{if(!document.hidden){refresh();refreshChart()}});
+</script>
+</body>
+</html>

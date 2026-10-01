@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Paper trade summary · v2</title>
+<style>
+:root{color-scheme:dark;font-family:Inter,system-ui,Arial,sans-serif;background:#08111d;color:#e9f1fa}*{box-sizing:border-box}body{margin:0;background:#08111d}a{color:#b9cee0;text-decoration:none}a:hover{color:#fff}.top{padding:20px max(20px,calc((100vw - 1400px)/2));background:#0d1928;border-bottom:1px solid #26384c;display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}.top h1{font-size:23px;margin:0;letter-spacing:-.03em}.sub{font-size:13px;color:#94acc5;margin-top:5px}.nav{border:1px solid #365069;border-radius:8px;padding:9px 13px;font-size:13px;background:#16283a}.wrap{max-width:1440px;margin:auto;padding:22px 20px 50px}.status{font-size:12px;color:#98b2ca;margin-bottom:17px}.status.error{color:#ff9d91}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:21px}.metric{border:1px solid #294056;background:#102035;border-radius:12px;padding:16px}.metric span{display:block;color:#9db4ca;font-size:12px;margin-bottom:7px}.metric strong{font-size:24px;letter-spacing:-.03em}.positive{color:#4bd0b0!important}.negative{color:#f17e78!important}.panel{border:1px solid #294056;background:#0e1d2e;border-radius:13px;margin-bottom:18px;overflow:hidden}.panel h2{font-size:16px;margin:0;padding:16px 18px;border-bottom:1px solid #294056}.panel h2 small{font-weight:400;color:#91abc2;font-size:12px;margin-left:8px}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;white-space:nowrap;font-size:12px}th,td{text-align:left;padding:10px 13px;border-bottom:1px solid #263b50}th{color:#9cb5ca;font-weight:600;background:#11243a}tbody tr:hover{background:#142941}tfoot td{font-weight:700;background:#13263b}td.pips{font-weight:700}.empty{color:#8fa9c0;text-align:center;padding:24px}.badge{font-size:10px;color:#a8c6e5;border:1px solid #426581;border-radius:4px;padding:2px 5px;margin-left:5px}.muted{color:#9bb2c8}.green{color:#4bd0b0}.red{color:#f17e78}.footnote{font-size:12px;color:#8da6bd;line-height:1.5}
+@media(max-width:800px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.top{padding:14px 16px}.wrap{padding:16px 10px 35px}.metric{padding:12px}.metric strong{font-size:20px}}
+</style></head><body>
+<header class="top"><div><h1>Paper trade summary · v2</h1><div class="sub">Live paper trades and v2 historical replay · New York time</div></div><a class="nav" href="/">← Back to chart</a></header>
+<main class="wrap">
+<div id="status" class="status">Loading paper ledger…</div>
+<div class="metrics">
+  <div class="metric"><span>Open trades</span><strong id="openCount">—</strong></div>
+  <div class="metric"><span>Closed net pips</span><strong id="closedPips">—</strong></div>
+  <div class="metric"><span>Open net pips</span><strong id="openPips">—</strong></div>
+  <div class="metric"><span>Combined net pips</span><strong id="combinedPips">—</strong></div>
+</div>
+<section class="panel"><h2>Open trades <small id="openCaption"></small></h2><div class="table-wrap"><table><thead><tr><th>Pair</th><th>Side</th><th>Opened (NY)</th><th>Entry</th><th>Current</th><th>Price time (NY)</th><th>TP1</th><th>Stop</th><th>Open net pips</th><th>Time open</th></tr></thead><tbody id="openRows"></tbody><tfoot><tr><td colspan="8">Open net total</td><td id="openFoot"></td><td></td></tr></tfoot></table></div></section>
+<section class="panel"><h2>Closed trades <small id="closedCaption"></small></h2><div class="table-wrap"><table><thead><tr><th>Pair</th><th>Side</th><th>Opened (NY)</th><th>Closed (NY)</th><th>Entry</th><th>Exit</th><th>Result</th><th>Net pips</th><th>Best move</th></tr></thead><tbody id="closedRows"></tbody><tfoot><tr><td colspan="7">Closed net total</td><td id="closedFoot"></td><td></td></tr></tfoot></table></div></section>
+<section class="panel"><h2>Totals by pair</h2><div class="table-wrap"><table><thead><tr><th>Pair</th><th>Closed net pips</th><th>Open net pips</th><th>Combined net pips</th><th>Status</th></tr></thead><tbody id="pairRows"></tbody></table></div></section>
+<div class="footnote">Historical replay trades were simulated by the v2 indicator rules on completed OANDA M15 midpoint candles; they were not placed in an OANDA account. Live paper trades use the same midpoint rules. Pips omit spread, slippage, and fees.</div>
+</main><script>
+const $=id=>document.getElementById(id);
+const nyFmt=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',month:'2-digit',day:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+const when=value=>value?nyFmt.format(new Date(value)):'—';
+const price=(pair,value)=>Number.isFinite(Number(value))?Number(value).toFixed(pair.endsWith('/JPY')?3:5):'—';
+const pips=value=>`${Number(value)>=0?'+':''}${Number(value||0).toFixed(1)}`;
+function pipClass(value){return Number(value)>0?'positive':Number(value)<0?'negative':''}
+function setPips(id,value){const cell=$(id);cell.textContent=pips(value);cell.className=pipClass(value)}
+function duration(start,end){const hours=Math.max(0,(new Date(end).getTime()-new Date(start).getTime())/3600000);return hours<24?`${hours.toFixed(1)} h`:`${(hours/24).toFixed(1)} d`}
+function cell(row,value,className=''){const td=document.createElement('td');td.textContent=value;if(className)td.className=className;row.appendChild(td);return td}
+function empty(body,columns,message){const tr=document.createElement('tr'),td=cell(tr,message,'empty');td.colSpan=columns;body.appendChild(tr)}
+function tradePairCell(row,t){cell(row,t.pair+(t.origin==='historical-replay'?' · replay':''))}
+function render(data){
+ const open=data.open||[],closed=data.recent||[],openTotal=open.reduce((sum,t)=>sum+Number(t.markPips||0),0),closedTotal=Number(data.netPips||0);
+ $('openCount').textContent=String(open.length);setPips('closedPips',closedTotal);setPips('openPips',openTotal);setPips('combinedPips',closedTotal+openTotal);
+ $('openCaption').textContent=`${open.length} active`;$('closedCaption').textContent=`${data.closedCount||0} recorded`;
+ $('status').className='status';$('status').textContent=`Last paper scan ${when(data.updatedAt)} New York${(data.errors||[]).length?' · '+data.errors.length+' feed errors':''}${data.quoteError?' · live quotes unavailable; showing completed candles':''}`;
+ const openBody=$('openRows');openBody.replaceChildren();
+ for(const t of open.sort((a,b)=>Date.parse(b.entryTime)-Date.parse(a.entryTime))){const tr=document.createElement('tr');tradePairCell(tr,t);cell(tr,t.direction.toUpperCase());cell(tr,when(t.entryTime));cell(tr,price(t.pair,t.entry));cell(tr,price(t.pair,t.mark));cell(tr,`${when(t.asOf)}${t.markSource==='OANDA midpoint quote'?' · quote':' · M15'}`,'muted');cell(tr,price(t.pair,t.tp1));cell(tr,price(t.pair,t.stop));cell(tr,pips(t.markPips),'pips '+pipClass(t.markPips));cell(tr,duration(t.entryTime,Date.now()));openBody.appendChild(tr)}
+ if(!open.length)empty(openBody,10,'No open paper trades.');setPips('openFoot',openTotal);
+ const closedBody=$('closedRows');closedBody.replaceChildren();
+ for(const t of closed){const tr=document.createElement('tr');tradePairCell(tr,t);cell(tr,t.direction.toUpperCase());cell(tr,when(t.entryTime));cell(tr,when(t.exitTime));cell(tr,price(t.pair,t.entry));cell(tr,price(t.pair,t.exit));cell(tr,t.exitReason==='tp1'?'TP1':t.exitReason==='stop'?'Stop':t.exitReason==='friday'?'Friday close':t.exitReason==='bias_lost'?'H4 bias lost':t.exitReason||'—');cell(tr,pips(t.netPips),'pips '+pipClass(t.netPips));cell(tr,t.maxFavorablePips==null?'—':pips(t.maxFavorablePips),'muted');closedBody.appendChild(tr)}
+ if(!closed.length)empty(closedBody,9,'No closed paper trades yet.');setPips('closedFoot',closedTotal);
+ const pairBody=$('pairRows');pairBody.replaceChildren();
+ const entries=Object.entries(data.pairTotals||{}).filter(([,v])=>v.hasOpen||v.closedPips||v.livePips).sort(([a],[b])=>a.localeCompare(b));
+ for(const [pair,v] of entries){const tr=document.createElement('tr');cell(tr,pair);cell(tr,pips(v.closedPips),pipClass(v.closedPips));cell(tr,v.hasOpen?pips(v.livePips):'—',pipClass(v.livePips));cell(tr,pips(v.totalPips),'pips '+pipClass(v.totalPips));cell(tr,v.hasOpen?'Open':'Closed',v.hasOpen?'green':'muted');pairBody.appendChild(tr)}
+ if(!entries.length)empty(pairBody,5,'No trades recorded yet.');
+}
+async function refresh(){try{const response=await fetch('/api/paper/all',{cache:'no-store'});const data=await response.json();if(!response.ok)throw new Error(data.error||'Could not load paper ledger');render(data)}catch(error){$('status').className='status error';$('status').textContent=error.message||String(error)}}
+refresh();setInterval(refresh,30000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh()});
+</script></body></html>
