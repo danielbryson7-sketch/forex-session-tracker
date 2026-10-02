@@ -62,7 +62,7 @@ function Get-V2Candles([string]$HostName,[string]$Pair,[DateTimeOffset]$From,[Da
 
 function New-V2Ledger {
   return @{ version=2; engine='daily-ote-st-ema-atr-v3.pine'; pricing='OANDA M15 midpoint'; startedAt=[DateTimeOffset]::UtcNow.ToString('o');
-    updatedAt=$null; pairs=@{}; trades=@(); errors=@() }
+    updatedAt=$null; pairs=@{}; trades=@(); events=@(); eventSeq=0; errors=@() }
 }
 
 function Scan-V2Pair($Ledger,[string]$Pair,[string]$HostName,[DateTimeOffset]$Now,[object[]]$M15Bars=$null) {

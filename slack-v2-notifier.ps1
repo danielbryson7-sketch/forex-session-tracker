@@ -42,14 +42,17 @@ function Format-Price([string]$Pair,$Value) {
   return ([double]$Value).ToString("F$digits",[Globalization.CultureInfo]::InvariantCulture)
 }
 
-function Send-Slack([string]$Message,[string]$ThreadTs = '') {
+function Send-Slack([string]$Message,[string]$ThreadTs = '',[switch]$Broadcast) {
   if ($DryRun) {
     Write-Host "DRY RUN ($ThreadTs): $Message"
     return @{ ts='dry-run-parent'; channel='dry-run-channel' }
   }
   if ($script:threadedMode) {
     $payload = @{ channel=$script:slackChannelId; text=$Message; unfurl_links=$false }
-    if ($ThreadTs) { $payload.thread_ts = $ThreadTs }
+    if ($ThreadTs) {
+      $payload.thread_ts = $ThreadTs
+      if ($Broadcast) { $payload.reply_broadcast = $true }
+    }
     $body = $payload | ConvertTo-Json -Compress -Depth 4
     $headers = @{ Authorization = "Bearer $($script:slackBotToken)" }
     $response = Invoke-RestMethod -Uri 'https://slack.com/api/chat.postMessage' -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $body -TimeoutSec 20
@@ -202,11 +205,14 @@ function Get-Snapshot($Ledger) {
   return @{ closed=$closed; open=$open; armed=$armed }
 }
 
-function Message-Arm([string]$Pair,$Pending,[bool]$InOte = $false) {
+function Message-Ote([string]$Pair,$ZoneLow,$ZoneHigh,$Time) {
+  return ":v2-in-ote: *$Pair entered OTE* · $(Format-NyTime $Time)`nZone $(Format-Price $Pair $ZoneLow)–$(Format-Price $Pair $ZoneHigh) · watching for a qualifying signal candle"
+}
+
+function Message-Arm([string]$Pair,$Pending) {
   $side = if ([string]$Pending.direction -in @('1','long','LONG')) { 'LONG' } else { 'SHORT' }
   $entry = Format-Price $Pair $Pending.entry
-  $icons = if ($InOte) { ':v2-armed: :v2-in-ote:' } else { ':v2-armed:' }
-  return "$icons *$Pair armed $side* · $(Format-NyTime $Pending.signalTime)`n70.5% entry waiting at $entry · signal close $(Format-Price $Pair $Pending.signalPrice)"
+  return ":v2-in-ote: :v2-armed: *$Pair armed $side* · $(Format-NyTime $Pending.signalTime)`n70.5% entry waiting at $entry · signal close $(Format-Price $Pair $Pending.signalPrice)"
 }
 
 function Get-ArmKey([string]$Pair,$Item) {
@@ -218,12 +224,11 @@ function Get-ArmFromTrade($Trade) {
     signalPrice=$Trade.signalPrice; entry=$Trade.entryTarget }
 }
 
-function Message-Parent($Trade,[ValidateSet('open','closed')][string]$Stage,[bool]$InOte = $false) {
+function Message-Parent($Trade,[ValidateSet('open','closed')][string]$Stage) {
   $pair = [string]$Trade.pair
   $side = ([string]$Trade.direction).ToUpperInvariant()
   $directionEmoji = if ($side -eq 'LONG') { ':v2-long:' } else { ':v2-short:' }
-  $oteEmoji = if ($InOte -and $Stage -eq 'open') { ':v2-in-ote: ' } else { '' }
-  $icons = ":v2-armed: $oteEmoji$directionEmoji"
+  $icons = ":v2-in-ote: :v2-armed: $directionEmoji"
   $status = "OPEN $side"
   if ($Stage -eq 'closed') {
     $exitReason = [string]$Trade.exitReason
@@ -253,41 +258,68 @@ function Set-ParentStage($State,$Trade,[ValidateSet('open','closed')][string]$St
   $thread = $State.threads[$armKey]
   if (-not $thread -or -not $thread.ts) { throw "Missing Slack parent for $armKey." }
   if ($thread.stage -eq $Stage -or $thread.stage -eq 'closed') { return }
-  $inOte = $Stage -eq 'open' -and [bool]$thread.inOte
-  Update-SlackParent (Message-Parent $Trade $Stage $inOte) ([string]$thread.ts)
+  Update-SlackParent (Message-Parent $Trade $Stage) ([string]$thread.ts)
   $thread.stage = $Stage
-  if ($Stage -eq 'closed') { $thread.inOte = $false }
   Save-State $State
 }
 
-function Ensure-Thread($State,[string]$Pair,$Trade) {
-  $armKey = Get-ArmKey $Pair $Trade
-  if (-not $armKey -or -not $Trade.signalTime) { throw "Cannot thread $Pair trade without its signal time." }
-  if (-not $State.threads) { $State.threads = @{} }
-  if ($State.threads.ContainsKey($armKey)) { return [string]$State.threads[$armKey].ts }
-  $arm = Get-ArmFromTrade $Trade
-  $armText = Message-Arm $Pair $arm
-  $posted = Send-Slack $armText
-  if (-not $posted.ts) { throw "Slack did not return a parent timestamp for $Pair." }
-  $State.threads[$armKey] = @{ ts=$posted.ts; channel=$posted.channel; stage='armed'; inOte=$false; armText=$armText }
+function New-OteVisit($State,[string]$Pair,[string]$DayKey,$ZoneLow,$ZoneHigh,$Time) {
+  $posted = Send-Slack (Message-Ote $Pair $ZoneLow $ZoneHigh $Time)
+  if ($script:threadedMode -and -not $posted.ts) { throw "Slack did not return an OTE parent timestamp for $Pair." }
+  $visit = @{ ts=if ($posted) { [string]$posted.ts } else { '' }; channel=if ($posted) { [string]$posted.channel } else { '' };
+    dayKey=$DayKey; zoneLow=$ZoneLow; zoneHigh=$ZoneHigh; stage='ote'; consumed=$false; inside=$true }
+  $State.oteVisits[$Pair] = $visit
   Save-State $State
-  return [string]$posted.ts
+  return $visit
+}
+
+function Ensure-ArmedThread($State,[string]$Pair,$Pending,[string]$DayKey) {
+  $armKey = Get-ArmKey $Pair $Pending
+  if (-not $Pending.signalTime) { throw "Cannot thread $Pair trade without its signal time." }
+  if ($State.threads.ContainsKey($armKey)) { return [string]$State.threads[$armKey].ts }
+  $visit = $State.oteVisits[$Pair]
+  if (-not $visit -or $visit.dayKey -ne $DayKey -or $visit.consumed) {
+    $visit = New-OteVisit $State $Pair $DayKey $Pending.zoneLow $Pending.zoneHigh $Pending.signalTime
+  }
+  $armText = Message-Arm $Pair $Pending
+  if ($script:threadedMode) {
+    Update-SlackParent $armText ([string]$visit.ts)
+    $null = Send-Slack ":v2-armed: *ARMED — $Pair* · $(Format-NyTime $Pending.signalTime) · waiting for 70.5% retouch at $(Format-Price $Pair $Pending.entry)" ([string]$visit.ts) -Broadcast
+  } else { $null = Send-Slack $armText }
+  $State.threads[$armKey] = @{ ts=$visit.ts; channel=$visit.channel; stage='armed'; armText=$armText; oteSeen=$true }
+  $visit.consumed = $true
+  $visit.stage = 'armed'
+  Save-State $State
+  return [string]$visit.ts
+}
+
+function Ensure-Thread($State,[string]$Pair,$Trade) {
+  $arm = Get-ArmFromTrade $Trade
+  $arm.zoneLow=$Trade.entryZoneLow; $arm.zoneHigh=$Trade.entryZoneHigh
+  return Ensure-ArmedThread $State $Pair $arm ([string]$Trade.signalDay)
 }
 
 function Message-Open($Position) {
   $pair = [string]$Position.pair
   $practice = if ($Position.practice.status) { [string]$Position.practice.status } else { 'PAPER_ONLY' }
   $side = ([string]$Position.direction).ToUpperInvariant()
+  $directionEmoji = if ($side -eq 'LONG') { ':v2-long:' } else { ':v2-short:' }
   $fill = if ($Position.practice.fillPrice) { " at $(Format-Price $pair $Position.practice.fillPrice)" } else { '' }
   $fillTime = if ($Position.practice.fillTime) { " · $(Format-NyTime $Position.practice.fillTime)" } else { '' }
-  return ":large_blue_circle: *TRADE OPENED — $pair $side*`nPaper entry: *$(Format-Price $pair $Position.entry)* · entry candle $(Format-NyTime $Position.entryTime) · 70.5% OTE retouch`nTP $(Format-Price $pair $Position.tp1) · SL $(Format-Price $pair $Position.stop)`nOANDA practice: $practice$fill$fillTime"
+  return "$directionEmoji *TRADE OPENED — $pair $side*`nPaper entry: *$(Format-Price $pair $Position.entry)* · entry candle $(Format-NyTime $Position.entryTime) · 70.5% OTE retouch`nTP $(Format-Price $pair $Position.tp1) · SL $(Format-Price $pair $Position.stop)`nOANDA practice: $practice$fill$fillTime"
 }
 
 function Message-Close($Trade) {
   $pair = [string]$Trade.pair
   $pips = [double]$Trade.netPips
   $sign = if ($pips -ge 0) { '+' } else { '' }
-  $icon = if ($pips -ge 0) { ':white_check_mark:' } else { ':red_circle:' }
+  $icon = switch ([string]$Trade.exitReason) {
+    'tp1' { ':v2-take-profit:' }
+    'gap_tp1' { ':v2-take-profit:' }
+    'stop' { ':v2-stop-loss:' }
+    'gap_stop' { ':v2-stop-loss:' }
+    default { ':checkered_flag:' }
+  }
   return "$icon *$pair $(([string]$Trade.direction).ToUpperInvariant()) closed $sign$($pips.ToString('F1',[Globalization.CultureInfo]::InvariantCulture)) pips* · $(Format-NyTime $Trade.exitTime)`nReason $($Trade.exitReason) · entry $(Format-Price $pair $Trade.entry) → exit $(Format-Price $pair $Trade.exit)"
 }
 
@@ -309,52 +341,57 @@ function Get-LiveOteMarks([string[]]$Pairs) {
   return $marks
 }
 
-function Refresh-OteStatus($State,$Snapshot,$Ledger) {
-  if (-not $script:threadedMode -or $DryRun) { return }
-  $active = @()
-  foreach ($key in @($Snapshot.armed.Keys)) {
-    if (-not $State.threads.ContainsKey($key) -or $State.threads[$key].stage -eq 'closed') { continue }
-    $item = $Snapshot.armed[$key]
-    $zone = $Ledger.pairs[$item.pair].ote
-    $valid = $zone -and $zone.asOf -and
-      ([DateTimeOffset]::UtcNow-[DateTimeOffset]::Parse([string]$zone.asOf)).TotalMinutes -le 30 -and
-      [double]$zone.high -gt [double]$zone.low
-    $active += @{ key=$key; pair=$item.pair; stage='armed'; item=$item.pending;
-      low=if ($valid) { [double]$zone.low } else { $null }; high=if ($valid) { [double]$zone.high } else { $null } }
-  }
-  foreach ($key in @($Snapshot.open.Keys)) {
-    $position = $Snapshot.open[$key]
-    $armKey = Get-ArmKey ([string]$position.pair) $position
-    if (-not $State.threads.ContainsKey($armKey) -or $State.threads[$armKey].stage -eq 'closed') { continue }
-    $active += @{ key=$armKey; pair=$position.pair; stage='open'; item=$position;
-      low=$position.entryZoneLow; high=$position.entryZoneHigh }
-  }
-  $marks = @{}
-  if ($active.Count) {
-    try { $marks = Get-LiveOteMarks @($active | ForEach-Object { $_.pair }) }
-    catch { Write-Warning "Could not check live OTE quotes: $($_.Exception.Message)"; return }
-  }
-  foreach ($item in $active) {
-    $thread = $State.threads[$item.key]
-    $inside = $false
-    if ($marks.ContainsKey($item.pair) -and $null -ne $item.low -and $null -ne $item.high) {
-      $midpoint = [double]$marks[$item.pair]
-      $inside = $midpoint -ge [double]$item.low -and $midpoint -le [double]$item.high
+function Process-V2SignalEvents($State,$Ledger) {
+  foreach ($event in @($Ledger.events | Sort-Object {[long]$_.seq})) {
+    if ([long]$event.seq -le [long]$State.lastSignalEventSeq) { continue }
+    if ($event.kind -eq 'ote') {
+      $visit = $State.oteVisits[[string]$event.pair]
+      if (-not $visit -or $visit.dayKey -ne $event.dayKey -or $visit.consumed) {
+        $null = New-OteVisit $State ([string]$event.pair) ([string]$event.dayKey) $event.zoneLow $event.zoneHigh $event.time
+      }
+    } elseif ($event.kind -eq 'armed') {
+      $null = Ensure-ArmedThread $State ([string]$event.pair) $event.pending ([string]$event.dayKey)
     }
-    if ([bool]$thread.inOte -eq $inside) { continue }
-    $message = if ($item.stage -eq 'armed') { Message-Arm $item.pair $item.item $inside }
-      else { Message-Parent $item.item 'open' $inside }
-    Update-SlackParent $message ([string]$thread.ts)
-    $thread.inOte = $inside
+    $State.lastSignalEventSeq = [long]$event.seq
     Save-State $State
   }
-  $activeKeys = [Collections.Generic.HashSet[string]]::new([string[]]@($active | ForEach-Object { $_.key }))
-  foreach ($key in @($State.threads.Keys)) {
-    $thread = $State.threads[$key]
-    if ($thread.stage -ne 'armed' -or -not $thread.inOte -or $activeKeys.Contains($key) -or -not $thread.armText) { continue }
-    Update-SlackParent ([string]$thread.armText) ([string]$thread.ts)
-    $thread.inOte = $false
-    Save-State $State
+}
+
+function Refresh-PreArmOteStatus($State,$Ledger) {
+  $candidates = @()
+  foreach ($pair in @($Ledger.pairs.Keys)) {
+    if ($pair -notmatch '^[A-Z]{3}/[A-Z]{3}$') { continue }
+    $pairState = $Ledger.pairs[$pair]
+    $zone = $pairState.ote
+    if (-not $zone -or -not $zone.asOf -or -not $pairState.completeSession -or
+        [int]$pairState.killZone -eq 0 -or [int]$pairState.bias -eq 0 -or
+        [int]$pairState.entriesToday -ge 2 -or $pairState.position -or
+        [double]$zone.high -le [double]$zone.low) { continue }
+    if (([DateTimeOffset]::UtcNow-[DateTimeOffset]::Parse([string]$zone.asOf)).TotalMinutes -gt 30) { continue }
+    $candidates += @{ pair=$pair; dayKey=[string]$pairState.dayKey; low=[double]$zone.low; high=[double]$zone.high }
+  }
+  if (-not $candidates.Count) { return }
+  try { $marks = Get-LiveOteMarks @($candidates | ForEach-Object { $_.pair }) }
+  catch {
+    if (-not $script:lastOteQuoteWarningAt -or ([DateTimeOffset]::UtcNow-$script:lastOteQuoteWarningAt).TotalMinutes -ge 5) {
+      Write-Warning "Could not check live OTE quotes: $($_.Exception.Message)"
+      $script:lastOteQuoteWarningAt = [DateTimeOffset]::UtcNow
+    }
+    return
+  }
+  foreach ($item in $candidates) {
+    if (-not $marks.ContainsKey($item.pair)) { continue }
+    $mark = [double]$marks[$item.pair]
+    $inside = $mark -ge $item.low -and $mark -le $item.high
+    $visit = $State.oteVisits[$item.pair]
+    $wasInside = $visit -and $visit.dayKey -eq $item.dayKey -and [bool]$visit.inside
+    if ($visit -and $visit.dayKey -eq $item.dayKey -and [bool]$visit.inside -ne $inside) {
+      $visit.inside = $inside
+      Save-State $State
+    }
+    if (-not $inside -or $Ledger.pairs[$item.pair].pending) { continue }
+    if ($visit -and $visit.dayKey -eq $item.dayKey -and (-not $visit.consumed -or $wasInside)) { continue }
+    $null = New-OteVisit $State $item.pair $item.dayKey $item.low $item.high ([DateTimeOffset]::UtcNow.ToString('o'))
   }
 }
 
@@ -405,27 +442,24 @@ function Scan-Once {
   $ledger = Read-Ledger
   $snapshot = Get-Snapshot $ledger
   if (-not (Test-Path $StatePath)) {
-    $state = @{ seenClosed=@($snapshot.closed.Keys); seenOpen=@($snapshot.open.Keys); seenArm=@($snapshot.armed.Keys); threads=@{}; initializedAt=[DateTimeOffset]::UtcNow.ToString('o') }
+    $state = @{ seenClosed=@($snapshot.closed.Keys); seenOpen=@($snapshot.open.Keys); seenArm=@($snapshot.armed.Keys);
+      threads=@{}; oteVisits=@{}; lastSignalEventSeq=[long]$ledger.eventSeq; initializedAt=[DateTimeOffset]::UtcNow.ToString('o') }
     Save-State $state
     Write-Host 'Slack V2 notifier initialized from current ledger; old trades will not be reposted.'
     return
   }
   $state = Get-Content -Raw $StatePath | ConvertFrom-Json -AsHashtable -DateKind String
   if (-not $state.threads) { $state.threads = @{} }
+  if (-not $state.oteVisits) { $state.oteVisits = @{} }
+  Refresh-PreArmOteStatus $state $ledger
+  Process-V2SignalEvents $state $ledger
   $seenClosed = [Collections.Generic.HashSet[string]]::new([string[]]@($state.seenClosed))
   $seenOpen = [Collections.Generic.HashSet[string]]::new([string[]]@($state.seenOpen))
   $seenArm = [Collections.Generic.HashSet[string]]::new([string[]]@($state.seenArm))
   foreach ($key in @($snapshot.armed.Keys | Sort-Object)) {
     if ($seenArm.Contains($key)) { continue }
     $item = $snapshot.armed[$key]
-    if ($script:threadedMode) {
-      if (-not $state.threads.ContainsKey($key)) {
-        $armText = Message-Arm $item.pair $item.pending
-        $posted = Send-Slack $armText
-        $state.threads[$key] = @{ ts=$posted.ts; channel=$posted.channel; stage='armed'; inOte=$false; armText=$armText }
-        Save-State $state
-      }
-    } else { $null = Send-Slack (Message-Arm $item.pair $item.pending) }
+    $null = Ensure-ArmedThread $state $item.pair $item.pending ([string]$ledger.pairs[$item.pair].dayKey)
     [void]$seenArm.Add($key)
     $state.seenArm = @($seenArm); Save-State $state
   }
@@ -463,7 +497,6 @@ function Scan-Once {
     [void]$seenClosed.Add($key)
     $state.seenClosed = @($seenClosed); Save-State $state
   }
-  Refresh-OteStatus $state $snapshot $ledger
   Send-DailySummaryIfDue $state $ledger
 }
 

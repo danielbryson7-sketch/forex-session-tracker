@@ -68,6 +68,16 @@ function Close-V2Position($Ledger,$State,[string]$Pair,[double]$Exit,[string]$Re
   $State.position=$null
 }
 
+function Add-V2SignalEvent($Ledger,[string]$Kind,[string]$Pair,[DateTimeOffset]$Time,$Details) {
+  if (-not $Ledger.ContainsKey('eventSeq')) { $Ledger.eventSeq=0 }
+  if (-not $Ledger.ContainsKey('events')) { $Ledger.events=@() }
+  $Ledger.eventSeq=[long]$Ledger.eventSeq+1
+  $event=@{ seq=$Ledger.eventSeq; kind=$Kind; pair=$Pair; time=$Time.ToString('o') }
+  foreach ($key in $Details.Keys) { $event[$key]=$Details[$key] }
+  $Ledger.events=@($Ledger.events)+@($event)
+  if ($Ledger.events.Count -gt 2000) { $Ledger.events=@($Ledger.events | Select-Object -Last 2000) }
+}
+
 function Invoke-V2Bar($Ledger,$State,[string]$Pair,$Bar,[DateTimeOffset]$StartAt) {
   $b=Get-V2MidBar $Bar
   $time=$b.dt; $end=$time.AddMinutes(15); $key=Get-V2DayKey $time
@@ -177,7 +187,12 @@ function Invoke-V2Bar($Ledger,$State,[string]$Pair,$Bar,[DateTimeOffset]$StartAt
   }
   if ($live -and $zone -ne 0 -and $State.completeSession -and $bias -ne 0 -and -not $State.pending -and -not $State.position -and $State.entriesToday -lt 2 -and -not $entered -and $State.ote -and [double]$State.fibHigh -gt [double]$State.fibLow) {
     $zl=[double]$State.ote.low; $zh=[double]$State.ote.high
-    if ($b.low -le $zh -and $b.high -ge $zl) { $State.touched=$true }
+    if ($b.low -le $zh -and $b.high -ge $zl) {
+      if (-not $State.touched) {
+        Add-V2SignalEvent $Ledger 'ote' $Pair $end @{ dayKey=$key; zoneLow=$zl; zoneHigh=$zh }
+      }
+      $State.touched=$true
+    }
     $rejected=if ($bias -eq 1) { $b.close -gt $zh } else { $b.close -lt $zl }
     if ($State.touched -and $rejected) {
       $emaOk=$bias*($ema20-$ema50) -gt 0
@@ -185,6 +200,7 @@ function Invoke-V2Bar($Ledger,$State,[string]$Pair,$Bar,[DateTimeOffset]$StartAt
       if ($emaOk -and $null -ne $atrRatio -and $atrRatio -le 1.4) {
         $State.pending=@{ direction=$bias; signalTime=$time.ToString('o'); signalPrice=$b.close; signalOpen=$b.open; entry=[double]$State.ote.p705;
           high=[double]$State.fibHigh; low=[double]$State.fibLow; zoneLow=$zl; zoneHigh=$zh; ema20=$ema20; ema50=$ema50; atrRatio=$atrRatio }
+        Add-V2SignalEvent $Ledger 'armed' $Pair $end @{ dayKey=$key; pending=$State.pending }
       }
       $State.touched=$false
     }
