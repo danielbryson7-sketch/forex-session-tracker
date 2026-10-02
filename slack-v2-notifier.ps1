@@ -37,6 +37,10 @@ function Format-NyTime($Value) {
   return [TimeZoneInfo]::ConvertTime([DateTimeOffset]::Parse([string]$Value),$nyZone).ToString('MM/dd HH:mm') + ' NY'
 }
 
+function Format-NySignalClose($Value) {
+  return Format-NyTime ([DateTimeOffset]::Parse([string]$Value).AddMinutes(15))
+}
+
 function Format-Price([string]$Pair,$Value) {
   $digits = if ($Pair.EndsWith('/JPY')) { 3 } else { 5 }
   return ([double]$Value).ToString("F$digits",[Globalization.CultureInfo]::InvariantCulture)
@@ -212,7 +216,7 @@ function Message-Ote([string]$Pair,$ZoneLow,$ZoneHigh,$Time) {
 function Message-Arm([string]$Pair,$Pending) {
   $side = if ([string]$Pending.direction -in @('1','long','LONG')) { 'LONG' } else { 'SHORT' }
   $entry = Format-Price $Pair $Pending.entry
-  return ":v2-in-ote: :v2-armed: *$Pair armed $side* · $(Format-NyTime $Pending.signalTime)`n70.5% entry waiting at $entry · signal close $(Format-Price $Pair $Pending.signalPrice)"
+  return ":v2-in-ote: :v2-armed: *$Pair armed $side* · signal candle closed $(Format-NySignalClose $Pending.signalTime)`n70.5% entry waiting at $entry · signal close $(Format-Price $Pair $Pending.signalPrice)"
 }
 
 function Get-ArmKey([string]$Pair,$Item) {
@@ -242,7 +246,7 @@ function Message-Parent($Trade,[ValidateSet('open','closed')][string]$Stage) {
     $icons += " $exitEmoji"
     $status = "CLOSED $side · $($exitReason.ToUpperInvariant())"
   }
-  $text = "$icons *$pair $status*`nArmed $(Format-NyTime $Trade.signalTime) · signal close $(Format-Price $pair $Trade.signalPrice) · 70.5% $(Format-Price $pair $Trade.entryTarget)"
+  $text = "$icons *$pair $status*`nArmed $(Format-NySignalClose $Trade.signalTime) · signal close $(Format-Price $pair $Trade.signalPrice) · 70.5% $(Format-Price $pair $Trade.entryTarget)"
   $text += "`nOpened $(Format-NyTime $Trade.entryTime) at $(Format-Price $pair $Trade.entry)"
   if ($Stage -eq 'closed') {
     $pips = [double]$Trade.netPips
@@ -279,12 +283,12 @@ function Ensure-ArmedThread($State,[string]$Pair,$Pending,[string]$DayKey) {
   if ($State.threads.ContainsKey($armKey)) { return [string]$State.threads[$armKey].ts }
   $visit = $State.oteVisits[$Pair]
   if (-not $visit -or $visit.dayKey -ne $DayKey -or $visit.consumed) {
-    $visit = New-OteVisit $State $Pair $DayKey $Pending.zoneLow $Pending.zoneHigh $Pending.signalTime
+    $visit = New-OteVisit $State $Pair $DayKey $Pending.zoneLow $Pending.zoneHigh ([DateTimeOffset]::Parse([string]$Pending.signalTime).AddMinutes(15).ToString('o'))
   }
   $armText = Message-Arm $Pair $Pending
   if ($script:threadedMode) {
     Update-SlackParent $armText ([string]$visit.ts)
-    $null = Send-Slack ":v2-armed: *ARMED — $Pair* · $(Format-NyTime $Pending.signalTime) · waiting for 70.5% retouch at $(Format-Price $Pair $Pending.entry)" ([string]$visit.ts) -Broadcast
+    $null = Send-Slack ":v2-armed: *ARMED — $Pair* · $(Format-NySignalClose $Pending.signalTime) · waiting for 70.5% retouch at $(Format-Price $Pair $Pending.entry)" ([string]$visit.ts) -Broadcast
   } else { $null = Send-Slack $armText }
   $State.threads[$armKey] = @{ ts=$visit.ts; channel=$visit.channel; stage='armed'; armText=$armText; oteSeen=$true }
   $visit.consumed = $true
